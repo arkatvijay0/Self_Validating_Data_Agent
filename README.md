@@ -4,7 +4,7 @@
 
 <p align="center">
 
-&#x20; <strong>Automating Data Analysis with Validation, Self-Correction, and Evidence-Grounded Insights</strong>
+&#x20; <strong>An AI-powered framework for automated data analysis, result validation, and evidence-grounded insights.</strong>
 
 </p>
 
@@ -12,71 +12,97 @@
 
 <p align="center">
 
-&#x20; <img src="https://img.shields.io/badge/Python-3.11-blue?logo=python" alt="Python 3.11">
+&#x20; <img src="https://img.shields.io/badge/Python-3.11-blue?logo=python" alt="Python">
 
-&#x20; <img src="https://img.shields.io/badge/Streamlit-Web%20App-FF4B4B?logo=streamlit" alt="Streamlit">
+&#x20; <img src="https://img.shields.io/badge/Streamlit-Web\_App-FF4B4B?logo=streamlit" alt="Streamlit">
 
-&#x20; <img src="https://img.shields.io/badge/Data%20Science-EDA-orange" alt="Data Science">
+&#x20; <img src="https://img.shields.io/badge/Domain-Data\_Science-orange" alt="Data Science">
 
-&#x20; <img src="https://img.shields.io/badge/Project-Under%20Development-yellow" alt="Under Development">
+&#x20; <img src="https://img.shields.io/badge/Status-Under\_Development-yellow" alt="Under Development">
 
 </p>
 
 
 
-\## Overview
+\---
 
 
 
-Exploratory Data Analysis (EDA) is an essential step in data science, but it often involves repetitive tasks such as examining datasets, planning analyses, validating results, interpreting findings, and preparing reports.
+\## \*\*📌 1. Project Overview\*\*
 
 
 
-This project explores a \*\*self-validating AI agent\*\* that automates parts of this workflow through a modular Python pipeline. It combines data profiling, analysis planning, code execution, validation, insight generation, and evidence mapping to support more reliable and traceable data analysis.
+Exploratory Data Analysis (EDA) is an essential step in data science, but it often involves repetitive tasks such as data profiling, statistical analysis, result interpretation, and report generation.
 
 
 
-The objective is to reduce repetitive analytical work while keeping generated findings connected to supporting evidence.
+This project aims to automate parts of the EDA workflow using a modular Python pipeline with \*\*result validation, self-correction, insight verification, and evidence mapping\*\*.
 
 
 
-\## Key Features
+The goal is to improve analytical efficiency and traceability by connecting generated findings to supporting analytical results.
 
 
 
-| Feature | Description |
-
-|---|---|
-
-| Data Profiling | Examines dataset structure, columns, data types, and data quality. |
-
-| EDA Planning | Organizes analytical tasks into a structured workflow. |
-
-| Code Generation and Execution | Supports programmatic execution of analytical steps. |
-
-| Result Validation | Checks analytical outputs using implemented validation logic. |
-
-| Self-Correction | Attempts to recover from supported execution errors. |
-
-| Insight Validation | Evaluates generated insights against available analytical evidence. |
-
-| Evidence Mapping | Connects findings with supporting results. |
-
-| Recommendations | Generates recommendations based on analysis findings. |
-
-| Interactive Interface | Provides a Streamlit application for interacting with the workflow. |
+\## \*\*🎯 2. Project Objectives\*\*
 
 
 
-\*Feature availability and behavior depend on the current implementation and configuration.\*
+\- Automate repetitive exploratory data analysis tasks.
+
+\- Organize analytical tasks into a structured pipeline.
+
+\- Validate analytical results and generated insights.
+
+\- Support recovery from selected execution errors.
+
+\- Map insights to supporting evidence.
+
+\- Generate summaries and recommendations from analytical findings.
 
 
 
-\## System Architecture
+\## \*\*🚀 3. Key Features\*\*
 
 
 
-The intended analytical workflow is illustrated below.
+| \*\*Feature\*\* | \*\*Description\*\* |
+
+|:---|:---|
+
+| \*\*Data Profiling\*\* | Examines dataset structure, columns, data types, and data quality. |
+
+| \*\*EDA Planning\*\* | Organizes analytical tasks into a structured workflow. |
+
+| \*\*Code Generation \& Execution\*\* | Supports programmatic execution of analytical steps. |
+
+| \*\*Result Validation\*\* | Checks analytical outputs using implemented validation logic. |
+
+| \*\*Self-Correction\*\* | Attempts to recover from supported execution errors. |
+
+| \*\*Insight Validation\*\* | Evaluates generated insights against available analytical evidence. |
+
+| \*\*Evidence Mapping\*\* | Connects findings with supporting analytical results. |
+
+| \*\*Recommendation Generation\*\* | Generates recommendations based on analysis findings. |
+
+| \*\*Interactive Interface\*\* | Provides a Streamlit interface for interacting with the workflow. |
+
+
+
+\*Feature behavior depends on the current implementation and configuration.\*
+
+
+
+\## \*\*🏗️ 4. System Architecture\*\*
+
+
+
+The intended workflow is:
+
+
+
+\*\*Dataset Input → Data Profiling → Task Analysis → EDA Planning → Code Generation → Execution → Result Validation → Insight Validation → Evidence Mapping → Recommendations → Final Report\*\*
 
 
 
@@ -84,151 +110,123 @@ The intended analytical workflow is illustrated below.
 
 flowchart TD
 
-&#x20;   A\[Input Dataset] --> B\[Data Profiling]
+&#x20;   A\["Dataset Input"] --> B\["Data Profiling"]
 
-&#x20;   B --> C\[Task Analysis]
+&#x20;   B --> C\["Task Analysis"]
 
-&#x20;   C --> D\[EDA Planning]
+&#x20;   C --> D\["EDA Planning"]
 
-&#x20;   D --> E\[Code Generation]
+&#x20;   D --> E\["Code Generation"]
 
-&#x20;   E --> F\[Code Execution]
+&#x20;   E --> F\["Code Execution"]
 
-&#x20;   F --> G\[Result Validation]
+&#x20;   F --> G{"Result Validation"}
 
-&#x20;   G -->|Valid| H\[Insight Generation]
+&#x20;   G -->|Pass| H\["Insight Generation"]
 
-&#x20;   G -->|Failure| I\[Error Correction]
+&#x20;   G -->|Fail| I\["Error Correction"]
 
 &#x20;   I --> E
 
-&#x20;   H --> J\[Insight Validation]
+&#x20;   H --> J\["Insight Validation"]
 
-&#x20;   J --> K\[Evidence Mapping]
+&#x20;   J --> K\["Evidence Mapping"]
 
-&#x20;   K --> L\[Recommendations]
+&#x20;   K --> L\["Recommendations"]
 
-&#x20;   L --> M\[Final Report]
-
-```
-
-
-
-\## Technology Stack
-
-
-
-\- \*\*Programming Language:\*\* Python
-
-\- \*\*Data Processing:\*\* Pandas, NumPy
-
-\- \*\*Data Visualization:\*\* Matplotlib, Seaborn
-
-\- \*\*Machine Learning Utilities:\*\* Scikit-learn
-
-\- \*\*Application Framework:\*\* Streamlit
-
-\- \*\*AI Integration:\*\* OpenAI API, where configured
-
-\- \*\*Development Tools:\*\* Jupyter Notebook, VS Code, Git, GitHub
-
-
-
-\## Repository Structure
-
-
-
-```text
-
-Self\_Validating\_Data\_Agent/
-
-│
-
-├── app.py
-
-├── requirements.txt
-
-├── commands.txt
-
-├── .gitignore
-
-│
-
-├── data/
-
-│   └── raw/
-
-│       ├── sales.csv
-
-│       └── test\_data.csv
-
-│
-
-├── src/
-
-│   ├── data\_loader.py
-
-│   ├── data\_profiler.py
-
-│   ├── task\_analyzer.py
-
-│   ├── eda\_planner.py
-
-│   ├── code\_generator.py
-
-│   ├── code\_executor.py
-
-│   ├── code\_corrector.py
-
-│   ├── result\_aggregator.py
-
-│   ├── insight\_generator.py
-
-│   ├── insight\_validator.py
-
-│   ├── claim\_validator.py
-
-│   ├── evidence\_mapping.py
-
-│   ├── self\_correction.py
-
-│   ├── recommendation\_generator.py
-
-│   └── final\_report.py
-
-│
-
-└── tests/
-
-&#x20;   └── test\_data\_loader.py
+&#x20;   L --> M\["Final Report"]
 
 ```
 
 
 
-Additional modules and test scripts are included in the repository.
+\## \*\*🛠️ 5. Technology Stack\*\*
 
 
 
-\## Getting Started
+| \*\*Category\*\* | \*\*Technologies\*\* |
+
+|:---|:---|
+
+| \*\*Programming Language\*\* | Python 3.11 |
+
+| \*\*Data Processing\*\* | Pandas, NumPy |
+
+| \*\*Visualization\*\* | Matplotlib, Seaborn |
+
+| \*\*Machine Learning Utilities\*\* | Scikit-learn |
+
+| \*\*Application Framework\*\* | Streamlit |
+
+| \*\*AI Integration\*\* | OpenAI API, where configured |
+
+| \*\*Development Tools\*\* | Jupyter Notebook, VS Code |
+
+| \*\*Version Control\*\* | Git, GitHub |
 
 
 
-\### Prerequisites
+\## \*\*📂 6. Repository Structure\*\*
+
+
+
+| \*\*Path\*\* | \*\*Purpose\*\* |
+
+|:---|:---|
+
+| `app.py` | Streamlit application entry point |
+
+| `src/data\_loader.py` | Dataset loading |
+
+| `src/data\_profiler.py` | Dataset profiling |
+
+| `src/task\_analyzer.py` | Analytical task analysis |
+
+| `src/eda\_planner.py` | EDA planning |
+
+| `src/code\_generator.py` | Analytical code generation |
+
+| `src/code\_executor.py` | Code execution |
+
+| `src/insight\_generator.py` | Insight generation |
+
+| `src/insight\_validator.py` | Insight validation |
+
+| `src/claim\_validator.py` | Claim validation |
+
+| `src/evidence\_mapping.py` | Evidence mapping |
+
+| `src/recommendation\_generator.py` | Recommendation generation |
+
+| `src/final\_report.py` | Final report generation |
+
+| `tests/` | Automated tests |
+
+| `data/raw/` | Input datasets |
+
+| `requirements.txt` | Python dependencies |
+
+
+
+\## \*\*⚙️ 7. Installation and Setup\*\*
+
+
+
+\### \*\*Prerequisites\*\*
 
 
 
 \- Python 3.11
 
-\- Conda or another Python environment manager
+\- Conda
 
 \- Git
 
-\- An OpenAI API key if your selected workflow requires the OpenAI API
+\- An OpenAI API key if required by the selected workflow
 
 
 
-\### 1. Clone the Repository
+\### \*\*Step 1: Clone the Repository\*\*
 
 
 
@@ -242,7 +240,7 @@ cd Self\_Validating\_Data\_Agent
 
 
 
-\### 2. Create the Environment
+\### \*\*Step 2: Create the Environment\*\*
 
 
 
@@ -256,7 +254,7 @@ conda activate data\_agent
 
 
 
-\### 3. Install Dependencies
+\### \*\*Step 3: Install Dependencies\*\*
 
 
 
@@ -268,35 +266,11 @@ python -m pip install -r requirements.txt
 
 
 
-\### 4. Configure API Access (If Required)
+\## \*\*▶️ 8. How to Run\*\*
 
 
 
-Store your API key in an environment variable or a local `.env` file. Never commit API keys or other credentials to GitHub.
-
-
-
-For example, in Windows Command Prompt:
-
-
-
-```cmd
-
-set OPENAI\_API\_KEY=your\_api\_key\_here
-
-```
-
-
-
-Replace the placeholder with your actual key locally. Do not publish the key or include it in source code.
-
-
-
-\## Running the Application
-
-
-
-Launch the Streamlit interface:
+\### \*\*Launch the Streamlit Application\*\*
 
 
 
@@ -308,11 +282,7 @@ streamlit run app.py
 
 
 
-Open the local URL displayed in your terminal.
-
-
-
-To run the analysis pipeline directly, inspect the current entry point and its required arguments before using:
+\### \*\*Run the Analysis Pipeline\*\*
 
 
 
@@ -324,19 +294,15 @@ python src/main.py
 
 
 
-The direct pipeline command may require a dataset path or an analysis question, depending on the implementation.
+The direct pipeline command may require additional input arguments. Check the current implementation for the expected dataset path and analysis question.
 
 
 
-\## Testing
+\## \*\*🧪 9. Testing\*\*
 
 
 
-The repository includes test modules for data loading, result validation, insight validation, claim validation, and error-recovery workflows.
-
-
-
-Run the data loader test with:
+Run the data loader test:
 
 
 
@@ -348,7 +314,7 @@ python -m pytest tests/test\_data\_loader.py -v
 
 
 
-Run the broader test suite with:
+Run the test suite:
 
 
 
@@ -360,43 +326,43 @@ python -m pytest
 
 
 
-Some test scripts may require additional configuration or an API key. Review their prerequisites before running the full suite.
+Some tests may require additional configuration or API access.
 
 
 
-\## Potential Applications
+\## \*\*💡 10. Potential Applications\*\*
 
 
 
-\- Initial exploratory analysis of structured datasets
+\- Automated exploratory data analysis
 
-\- Data quality inspection
+\- Initial data quality assessment
 
 \- Exploratory sales and business analytics
 
-\- Evidence-supported analytical reporting
+\- Evidence-supported insight generation
 
-\- Automation of repetitive data analysis tasks
-
-
-
-\## Current Limitations
+\- Repetitive data analysis workflow automation
 
 
 
-\- Analytical quality depends on dataset quality and the validation rules implemented.
-
-\- Generated insights may require manual verification.
-
-\- Some workflows may depend on external AI services and API configuration.
-
-\- Runtime can vary with dataset size, model calls, and execution complexity.
-
-\- The project is under development, and not all workflows may be fully automated.
+\## \*\*⚠️ 11. Limitations\*\*
 
 
 
-\## Future Enhancements
+\- Analysis quality depends on input data and validation rules.
+
+\- AI-generated findings may require manual verification.
+
+\- Some workflows may require external API access.
+
+\- Runtime depends on dataset size and execution complexity.
+
+\- The project is under development.
+
+
+
+\## \*\*🔮 12. Future Enhancements\*\*
 
 
 
@@ -404,27 +370,29 @@ Some test scripts may require additional configuration or an API key. Review the
 
 \- Improve execution speed and error recovery.
 
-\- Add comprehensive tests and reproducible benchmarks.
+\- Add comprehensive automated tests.
 
-\- Improve interactive visualizations and report generation.
+\- Improve report generation and interactive visualizations.
 
-\- Evaluate insight accuracy and evidence traceability across multiple datasets.
-
-
-
-\## Author
+\- Evaluate insight accuracy across multiple datasets.
 
 
 
-\*\*Vijay Kumar AG\*\*  
+\## \*\*👨‍💻 13. Author\*\*
+
+
+
+\*\*Vijay Kumar AG\*\*
+
+
 
 M.Tech in Data Science | Presidency University, Bengaluru
 
 
 
-\- GitHub: \[@arkatvijay0](https://github.com/arkatvijay0)
+\- \*\*GitHub:\*\* \[@arkatvijay0](https://github.com/arkatvijay0)
 
-\- Project Repository: \[Self\_Validating\_Data\_Agent](https://github.com/arkatvijay0/Self\_Validating\_Data\_Agent)
+\- \*\*Project Repository:\*\* \[Self\_Validating\_Data\_Agent](https://github.com/arkatvijay0/Self\_Validating\_Data\_Agent)
 
 
 
@@ -434,7 +402,7 @@ M.Tech in Data Science | Presidency University, Bengaluru
 
 <p align="center">
 
-&#x20; <i>Building toward reliable, automated, and evidence-grounded data analysis.</i>
+&#x20; <strong>Building toward reliable, automated, and evidence-grounded data analysis.</strong>
 
 </p>
 
