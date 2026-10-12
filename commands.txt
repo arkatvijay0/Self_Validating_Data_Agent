@@ -1,0 +1,7 @@
+conda activate data_agent
+cd C:\Users\Vijay\Desktop\Self_Validating_Data_Agent
+python -m py_compile src\main.py app.py
+streamlit run app.py
+
+
+How many missing values are present in the dataset?

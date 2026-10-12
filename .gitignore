@@ -1,0 +1,28 @@
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+myvenv/
+.env_old/
+env/
+
+# Secrets
+.env
+.env.*
+
+# IDE and notebook cache
+.vscode/
+.ipynb_checkpoints/
+
+# Logs
+logs/
+
+# Generated output
+outputs/*
+
+# Local configuration
+config/
