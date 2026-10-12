@@ -4,4 +4,12 @@ python -m py_compile src\main.py app.py
 streamlit run app.py
 
 
+
+1. Stage your changes - git add .
+2. Commit your changes - git commit -m "Describe your changes"
+3. Push to GitHub - git push 
+4. Check the status - git status
+
+
+
 How many missing values are present in the dataset?
