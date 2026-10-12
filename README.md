@@ -184,7 +184,7 @@ streamlit run app.py
 
 
 
-M.Tech in Data Science | Presidency University, Bengaluru
+M.Tech in Data Science | Presidency University, Bengaluru.
 
 
 
