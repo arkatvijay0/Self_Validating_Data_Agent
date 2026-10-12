@@ -7,7 +7,7 @@ streamlit run app.py
 
 1. Stage your changes - git add .
 2. Commit your changes - git commit -m "Describe your changes"
-3. Push to GitHub - git push 
+3. Push to GitHub - git push origin main
 4. Check the status - git status
 
 
