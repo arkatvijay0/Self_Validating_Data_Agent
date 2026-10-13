@@ -323,11 +323,13 @@ def main():
     print("STEP 3 - EDA PLAN")
     print("=" * 70)
 
+
     plan = generate_plan_mock(
-        QUESTION,
-        task_analysis,
-        data_profile
-    )
+        task_analysis.get("task_type", "descriptive_summary"),
+        data_profile,
+        QUESTION
+            )
+
 
     print()
 

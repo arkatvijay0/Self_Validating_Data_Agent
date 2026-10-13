@@ -11,5 +11,10 @@ streamlit run app.py
 4. Check the status - git status
 
 
+conda activate data_agent
+cd C:\Users\Vijay\Desktop\Self_Validating_Data_Agent
+streamlit run app.py
+
 
 How many missing values are present in the dataset?
+What is the average duration of calls in August?

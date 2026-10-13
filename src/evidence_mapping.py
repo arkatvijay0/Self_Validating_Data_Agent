@@ -907,8 +907,10 @@ def _validate_descriptive_summary_claims(insight, evidence):
     def record(name, passed, reason):
         checks.append({"claim": name, "status": "PASS" if passed else "FAIL", "reason": None if passed else reason})
 
-    match = re.search(r"Dataset contains\s+(\d+)\s+rows and\s+(\d+)\s+columns", text, re.I)
-    record("dataset_dimensions", bool(match and int(match.group(1)) == facts.get("row_count") and int(match.group(2)) == facts.get("column_count")), "Reported row/column counts do not match the dataset.")
+    match = re.search(r"Dataset contains\s+([\d,]+)\s+rows and\s+([\d,]+)\s+columns", text, re.I)
+    claimed_rows = int(match.group(1).replace(",", "")) if match else None
+    claimed_columns = int(match.group(2).replace(",", "")) if match else None
+    record("dataset_dimensions", bool(match and claimed_rows == facts.get("row_count") and claimed_columns == facts.get("column_count")), "Reported row/column counts do not match the dataset.")
 
     columns_line = next((line for line in lines if line.strip().lower().startswith("- columns:")), "")
     missing_columns = [column for column in facts.get("columns", []) if str(column) not in columns_line]
@@ -1148,27 +1150,62 @@ def map_insight_to_evidence(
     analysis_type = evidence.get(
         "analysis_type"
     )
-
     # --------------------------------------------------------
     # FILTERED MEAN EVIDENCE
     # --------------------------------------------------------
-    if analysis_type == "filtered_mean":
-        supporting = evidence.get("supporting_result", {})
-        mean_value = supporting.get("mean_duration") if isinstance(supporting, dict) else None
-        month_value = evidence.get("filter_value")
-        rows = supporting.get("filtered_rows") if isinstance(supporting, dict) else None
-        valid_count = supporting.get("valid_duration_count") if isinstance(supporting, dict) else None
+    # The main pipeline can wrap the validated result as:
+    # evidence["result"] -> primary_result, or
+    # evidence["supporting_result"]["primary_result"].
+    # Search only known result containers and use the validated
+    # filtered_mean payload itself as the source of its values.
+    def find_filtered_mean(obj, depth=0):
+        if depth > 6 or not isinstance(obj, dict):
+            return None
+        if (
+            obj.get("analysis_type") == "filtered_mean"
+            and obj.get("mean_duration") is not None
+        ):
+            return obj
+        for key in ("primary_result", "result", "supporting_result", "evidence", "validated_result"):
+            child = obj.get(key)
+            found = find_filtered_mean(child, depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    filtered_mean_result = find_filtered_mean(evidence)
+    if analysis_type == "filtered_mean" or filtered_mean_result is not None:
+        source = filtered_mean_result if filtered_mean_result is not None else evidence
+        month_value = source.get("filter_value", evidence.get("filter_value"))
+        mean_value = source.get("mean_duration", evidence.get("mean_duration"))
+        rows = source.get("filtered_rows", evidence.get("filtered_rows"))
+        valid_count = source.get("valid_duration_count", evidence.get("valid_duration_count"))
         text = str(insight or "").lower()
         checks = []
         if month_value:
-            month_names = {"jan": "january", "feb": "february", "mar": "march", "apr": "april",
-                           "may": "may", "jun": "june", "jul": "july", "aug": "august",
-                           "sep": "september", "oct": "october", "nov": "november", "dec": "december"}
+            month_names = {
+                "jan": "january", "feb": "february", "mar": "march",
+                "apr": "april", "may": "may", "jun": "june",
+                "jul": "july", "aug": "august", "sep": "september",
+                "oct": "october", "nov": "november", "dec": "december",
+            }
             expected_month = month_names.get(str(month_value).lower(), str(month_value).lower())
-            checks.append({"check": "requested_month_mentioned",
-                           "status": "PASS" if expected_month in text else "FAIL"})
-        checks.append({"check": "mean_duration_mentioned",
-                       "status": "PASS" if mean_value is not None and "duration" in text and f"{float(mean_value):.2f}" in text else "FAIL"})
+            checks.append({
+                "check": "requested_month_mentioned",
+                "status": "PASS" if expected_month in text else "FAIL",
+            })
+        try:
+            mean_mentioned = (
+                mean_value is not None
+                and "duration" in text
+                and f"{float(mean_value):.2f}" in text
+            )
+        except (TypeError, ValueError):
+            mean_mentioned = False
+        checks.append({
+            "check": "mean_duration_mentioned",
+            "status": "PASS" if mean_mentioned else "FAIL",
+        })
         failed = [item for item in checks if item["status"] != "PASS"]
         return {
             "status": "PASS" if checks and not failed else "FAIL",
@@ -1179,8 +1216,137 @@ def map_insight_to_evidence(
             "filtered_rows": rows,
             "valid_duration_count": valid_count,
             "checks": checks,
-            "reason": None if not failed else "Filtered mean insight did not match its evidence."
+            "reason": None if not failed else "Filtered mean insight did not match its evidence.",
         }
+
+
+    # --------------------------------------------------------
+    # MEAN ANALYSIS
+    # --------------------------------------------------------
+    if analysis_type == "mean_analysis":
+
+        def find_mean_result(obj, depth=0):
+            """Find the validated mean payload inside known result containers."""
+            if depth > 6 or not isinstance(obj, dict):
+                return None
+
+            if (
+                obj.get("analysis_type") == "mean_analysis"
+                and obj.get("mean") is not None
+            ):
+                return obj
+
+            for key in (
+                "primary_result",
+                "result",
+                "supporting_result",
+                "evidence",
+                "validated_result",
+            ):
+                found = find_mean_result(obj.get(key), depth + 1)
+                if found is not None:
+                    return found
+            return None
+
+        mean_result = find_mean_result(evidence)
+        text = str(insight or "")
+        normalized_text = " ".join(
+            text.lower().replace("_", " ").split()
+        )
+
+        if mean_result is None:
+            return {
+                "status": "FAIL",
+                "analysis_type": "mean_analysis",
+                "insight": insight,
+                "evidence_summary": create_evidence_summary(evidence),
+                "reason": "No validated mean result was found in the evidence.",
+                "checks": [{
+                    "check": "validated_mean_available",
+                    "status": "FAIL",
+                }],
+            }
+
+        metric = mean_result.get("metric_column")
+        expected_mean = _parse_claim_number(mean_result.get("mean"))
+        checks = []
+
+        metric_text = " ".join(
+            str(metric).replace("_", " ").lower().split()
+        ) if metric is not None else ""
+        metric_pattern = (
+            r"(?<![\w])" + re.escape(metric_text) + r"(?![\w])"
+            if metric_text else None
+        )
+        metric_ok = bool(
+            metric_pattern and re.search(metric_pattern, normalized_text)
+        )
+        checks.append({
+            "check": "metric_column_mentioned",
+            "status": "PASS" if metric_ok else "FAIL",
+        })
+
+        # Parse complete numeric tokens, including comma-formatted values.
+        numeric_tokens = re.findall(
+            r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?",
+            text,
+        )
+        claimed_values = []
+        for token in numeric_tokens:
+            parsed = _parse_claim_number(token)
+            if parsed is not None:
+                claimed_values.append(parsed)
+
+        mean_words_present = bool(
+            re.search(r"\b(mean|average)\b", normalized_text)
+        )
+        mean_ok = (
+            expected_mean is not None
+            and mean_words_present
+            and any(round(value, 2) == round(expected_mean, 2)
+                    for value in claimed_values)
+        )
+        checks.append({
+            "check": "reported_mean_matches_validated_result",
+            "status": "PASS" if mean_ok else "FAIL",
+        })
+
+        # If the insight states an observation count, validate it as well.
+        valid_count = mean_result.get("valid_value_count")
+        if re.search(r"\b(observations?|valid values?|numeric values?)\b", normalized_text):
+            count_tokens = re.findall(
+                r"\b(\d[\d,]*)\s+(?:valid\s+)?(?:numeric\s+)?(?:observations?|values?)\b",
+                normalized_text,
+            )
+            count_values = []
+            for token in count_tokens:
+                try:
+                    count_values.append(int(token.replace(",", "")))
+                except ValueError:
+                    pass
+            count_ok = valid_count is not None and int(valid_count) in count_values
+            checks.append({
+                "check": "reported_valid_count_matches_evidence",
+                "status": "PASS" if count_ok else "FAIL",
+            })
+
+        failed_checks = [item for item in checks if item["status"] != "PASS"]
+        return {
+            "status": "PASS" if not failed_checks else "FAIL",
+            "analysis_type": "mean_analysis",
+            "insight": insight,
+            "metric_column": metric,
+            "validated_mean": expected_mean,
+            "valid_value_count": valid_count,
+            "evidence_summary": create_evidence_summary(evidence),
+            "supporting_result": mean_result,
+            "checks": checks,
+            "reason": (
+                None if not failed_checks
+                else "The mean insight does not match the validated evidence."
+            ),
+        }
+
 
     # --------------------------------------------------------
     # GROUPED ANALYSIS
@@ -1262,6 +1428,64 @@ def map_insight_to_evidence(
             )
 
         return result
+
+    # --------------------------------------------------------
+    # CONVERSION-FACTOR ANALYSIS
+    # --------------------------------------------------------
+    if analysis_type == "conversion_factor_analysis":
+        source = evidence.get("supporting_result", evidence.get("result"))
+        if not isinstance(source, dict):
+            return {
+                "status": "FAIL",
+                "analysis_type": analysis_type,
+                "insight": insight,
+                "evidence_summary": create_evidence_summary(evidence),
+                "reason": "Structured conversion-factor evidence is missing.",
+            }
+
+        # Support the normal evidence shape and a wrapped primary-result shape.
+        if source.get("analysis_type") != "conversion_factor_analysis":
+            for key in ("primary_result", "result", "supporting_result"):
+                nested = source.get(key)
+                if isinstance(nested, dict) and nested.get("analysis_type") == "conversion_factor_analysis":
+                    source = nested
+                    break
+
+        categorical = source.get("categorical_factor_results")
+        numeric = source.get("numeric_factor_results")
+        valid = (
+            source.get("analysis_type") == "conversion_factor_analysis"
+            and isinstance(categorical, dict)
+            and isinstance(numeric, dict)
+            and isinstance(source.get("overall_conversion_rate_percent"), (int, float))
+        )
+        text_lower = str(insight or "").lower()
+        legacy_error = "no valid correlation result" in text_lower
+        status = "PASS" if valid and not legacy_error and str(insight or "").strip() else "FAIL"
+        reason = None
+        if not valid:
+            reason = "Conversion-factor evidence does not contain the required validated result structure."
+        elif legacy_error:
+            reason = "The insight still contains the legacy correlation-analysis fallback message."
+        elif not str(insight or "").strip():
+            reason = "Insight text is empty."
+
+        return {
+            "status": status,
+            "analysis_type": analysis_type,
+            "insight": insight,
+            "evidence_summary": create_evidence_summary(evidence),
+            "supporting_result": source,
+            "claim_validation": {
+                "status": status,
+                "checks": {
+                    "structured_conversion_factor_evidence": valid,
+                    "legacy_correlation_fallback_absent": not legacy_error,
+                    "insight_present": bool(str(insight or "").strip()),
+                },
+            },
+            "reason": reason,
+        }
 
     # --------------------------------------------------------
     # CORRELATION ANALYSIS

@@ -111,6 +111,52 @@ def answer_calendar_question(text: str) -> str | None:
         )
     return None
 
+
+def answer_simple_data_quality_question(text: str, frame: pd.DataFrame) -> str | None:
+    """Answer basic deterministic dataset checks without running the full EDA pipeline."""
+    q = text.lower().strip()
+
+    asks_missing = bool(re.search(r"\b(missing|null|na values|nan values)\b", q)) and bool(
+        re.search(r"\b(value|values|cell|cells|data|count|present|many|column|columns)\b", q)
+    )
+    asks_duplicates = bool(re.search(r"\b(duplicate|duplicates|duplicated)\b", q))
+    asks_rows = bool(re.search(r"\b(row|rows|records|observations)\b", q)) and bool(
+        re.search(r"\b(how many|count|number|total|size)\b", q)
+    )
+    asks_columns = bool(re.search(r"\b(column|columns|features|variables)\b", q)) and bool(
+        re.search(r"\b(how many|count|number|total)\b", q)
+    )
+
+    if asks_missing:
+        missing_by_column = frame.isna().sum()
+        total_missing = int(missing_by_column.sum())
+        lines = [f"Total missing cells: {total_missing:,}."]
+        if total_missing == 0:
+            lines.append(f"Checked {len(frame):,} rows across {len(frame.columns):,} columns; no null/NaN cells were found.")
+        else:
+            lines.append("Columns with missing values:")
+            for column, count in missing_by_column[missing_by_column > 0].items():
+                pct = (int(count) / max(len(frame), 1)) * 100
+                lines.append(f"- {column}: {int(count):,} ({pct:.2f}% of rows)")
+        lines.append("Method: direct check of the uploaded dataset using pandas isna().sum(). This quick check does not run the full self-validation pipeline.")
+        return "\n".join(lines)
+
+    if asks_duplicates:
+        count = int(frame.duplicated().sum())
+        return (
+            f"Exact duplicate rows: {count:,}.\n"
+            f"Checked all {len(frame):,} rows across {len(frame.columns):,} columns.\n"
+            "Method: direct full-row duplicate check on the uploaded dataset; the full EDA pipeline was not run."
+        )
+
+    if asks_rows and not asks_columns:
+        return f"The uploaded dataset contains {len(frame):,} rows (records). This is a direct dataset check; the full EDA pipeline was not run."
+
+    if asks_columns:
+        return f"The uploaded dataset contains {len(frame.columns):,} columns (variables).\nColumns: {', '.join(map(str, frame.columns))}.\nThis is a direct dataset check; the full EDA pipeline was not run."
+
+    return None
+
 if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
     if not question.strip():
         st.warning("Please enter an analysis question first.")
@@ -123,6 +169,16 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
         st.caption("The EDA pipeline was not run for this general calendar question.")
         st.stop()
 
+    quick_answer = answer_simple_data_quality_question(question, preview_df)
+    if quick_answer:
+        st.subheader("Quick dataset check")
+        st.info(quick_answer)
+        st.caption(
+            "This fast path avoids the slower multi-step EDA pipeline "
+            "for basic data-quality questions."
+        )
+        st.stop()
+
     if pipeline is None:
         st.error(f"Could not import the analysis pipeline: {PIPELINE_IMPORT_ERROR}")
         st.stop()
@@ -130,45 +186,65 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
     try:
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        # Save each upload under a stable, sanitized name. Convert Excel to CSV
-        # because the existing pipeline and helper modules currently read CSV.
+
+        # Save the uploaded dataset as CSV for the existing pipeline.
+        dataset_path = UPLOAD_DIR / "active_uploaded_dataset.csv"
         if suffix == ".csv":
-            dataset_path = UPLOAD_DIR / "active_uploaded_dataset.csv"
             dataset_path.write_bytes(file_bytes)
         else:
-            dataset_path = UPLOAD_DIR / "active_uploaded_dataset.csv"
             preview_df.to_csv(dataset_path, index=False)
 
-        # Prevent a previous report from being mistaken for the current run.
+        # Remove any previous report so it cannot be mistaken for this run.
         if REPORT_PATH.exists():
             REPORT_PATH.unlink()
 
         log_buffer = io.StringIO()
         with st.spinner("Profiling, planning, executing, and validating the analysis..."):
             with contextlib.redirect_stdout(log_buffer), contextlib.redirect_stderr(log_buffer):
-                pipeline.main(dataset_path=str(dataset_path), user_question=question)
+                pipeline.main(
+                    dataset_path=str(dataset_path),
+                    user_question=question,
+                )
 
-        st.success("Pipeline execution finished. Review the validation status below; completion alone does not mean the answer passed validation.")
+        # Capture output without displaying a green completion banner.
         logs = log_buffer.getvalue()
+
         with st.expander("View pipeline output", expanded=False):
             st.text(logs[-30000:] if logs else "No console output was captured.")
 
         if REPORT_PATH.exists():
-            report_text = REPORT_PATH.read_text(encoding="utf-8", errors="replace")
+            report_text = REPORT_PATH.read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+
             st.subheader("Final analysis report")
             st.text(report_text)
+
             st.download_button(
                 "Download report (.txt)",
                 data=report_text,
                 file_name="final_eda_report.txt",
                 mime="text/plain",
             )
-            if "Overall reliability\n------------------------------------------------------------\nPASS" in report_text or "Overall reliability: PASS" in report_text:
+
+            if (
+                "Overall reliability\n------------------------------------------------------------\nPASS"
+                in report_text
+                or "Overall reliability: PASS" in report_text
+            ):
                 st.success("Overall reliability: PASS")
             elif "Overall reliability" in report_text and "FAIL" in report_text:
-                st.warning("The report indicates a validation/reliability failure. Review the insight and question relevance checks.")
+                st.warning(
+                    "The report indicates a validation/reliability failure. "
+                    "Review the insight and question relevance checks."
+                )
         else:
-            st.warning("The pipeline finished without creating a final report. Check the pipeline output for details.")
+            st.warning(
+                "The pipeline finished without creating a final report. "
+                "Check the pipeline output for details."
+            )
+
     except Exception as exc:
         st.error(f"Analysis failed: {type(exc).__name__}: {exc}")
         st.exception(exc)

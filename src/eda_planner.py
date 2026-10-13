@@ -1,4 +1,5 @@
 import json
+import re
 
 
 def generate_plan_mock(task_type, data_profile, user_query):
@@ -29,6 +30,99 @@ def generate_plan_mock(task_type, data_profile, user_query):
 
     query = user_query.lower()
 
+    # BANK_CONVERSION_ROUTING_FIX_V1
+    # Match natural-language names to columns actually present in this dataset.
+    bank_aliases = {
+        "account balance": "balance",
+        "contact method": "contact",
+        "housing loan": "housing",
+        "personal loan": "loan",
+        "job category": "job",
+        "previous campaign outcome": "poutcome",
+        "previous outcome": "poutcome",
+        "previously contacted": "previously_contacted",
+        "call duration": "duration",
+    }
+    requested_factors = []
+    for alias, column in sorted(bank_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+        if column in columns and re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", query):
+            if column not in requested_factors:
+                requested_factors.append(column)
+    for column in columns:
+        normalized = str(column).lower().replace("_", " ")
+        if re.search(r"(?<![\w])" + re.escape(normalized) + r"(?![\w])", query):
+            if column not in ("conversion", "y") and column not in requested_factors:
+                requested_factors.append(column)
+
+    # BEGIN CONVERSION-FACTOR PLAN RULE
+    conversion_factor_request = (
+        "conversion" in query
+        and any(
+            phrase in query
+            for phrase in (
+                "factor",
+                "associated",
+                "affecting",
+                "influencing",
+                "important patterns",
+                "patterns in",
+                "customer conversion",
+                "drivers of",
+                "predictors of",
+                "conversion rate",
+                "conversion rates",
+                "prioritize",
+                "recommend",
+                "pre-contact",
+                "before a marketing call",
+            )
+        )
+    )
+
+    if conversion_factor_request and (
+        "conversion" in columns or "y" in columns
+    ):
+        if requested_factors:
+            factors_text = ", ".join(f"'{column}'" for column in requested_factors)
+            factor_scope = (
+                f"Analyze the explicitly requested factor columns: {factors_text}. "
+                "Do not replace them with a default column."
+            )
+        else:
+            factor_scope = (
+                "Compare conversion rates across available customer attributes "
+                "and analyze numeric factors by meaningful groups."
+            )
+        return [
+            (
+                "Identify customer conversion outcomes and calculate the overall "
+                "conversion rate. " + factor_scope + " For each requested factor, "
+                "report group sizes, converted counts, observed conversion rates, "
+                "and the highest/lowest groups where meaningful. Validate all "
+                "rates against the source dataset. Treat findings as observational, "
+                "not proof of causation. For pre-contact recommendations, exclude "
+                "post-contact variables such as call duration."
+            )
+        ]
+    # END CONVERSION-FACTOR PLAN RULE
+
+
+    # Job-only fallback is permitted only when job is explicitly requested.
+    if (("conversion rate" in query or "conversion rates" in query)
+            and any(term in query for term in ("highest", "lowest", "which", "rank", "compare"))
+            and "job" in columns
+            and ("job" in requested_factors)
+            and len(requested_factors) == 1):
+        outcome_column = "conversion" if "conversion" in columns else ("y" if "y" in columns else None)
+        if outcome_column:
+            return [
+                "Group customers by the explicitly requested 'job' category.",
+                f"Within each job category, count converted customers using '{outcome_column}' (1/yes means converted).",
+                "Calculate each job category's observed conversion rate as converted customers divided by all customers in that category, multiplied by 100.",
+                "Rank job categories by observed conversion rate in descending order and report group sizes.",
+                "Validate the grouped counts and rates against the uploaded dataset; do not claim causation."
+            ]
+
     if ("duration" in query and any(word in query for word in ("average", "mean", "avg"))
             and any(month in query for month in ("january", "february", "march", "april", "may", "june",
                                                   "july", "august", "september", "october", "november", "december"))):
@@ -41,6 +135,50 @@ def generate_plan_mock(task_type, data_profile, user_query):
         month_code = month_names.get(selected_month, "")
         return [
             f"Filter rows where the 'month' column equals '{month_code}', then calculate the mean of numeric 'duration' values and report the filtered row count and valid duration count."
+        ]
+
+    # ==================================================
+    # Specific mean/average questions (after preserving the August case)
+    # ==================================================
+
+    if task_type == "mean_analysis":
+        # Match real column names as whole words. This prevents false matches
+        # such as "age" inside "average" and "y" inside "salary".
+        def _whole_phrase_match(text, phrase):
+            phrase = str(phrase).strip().replace("_", " ")
+            if not phrase:
+                return False
+            pattern = r"(?<![\w])" + re.escape(phrase) + r"(?![\w])"
+            return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+        requested_column = next(
+            (col for col in sorted(columns, key=lambda value: len(str(value)), reverse=True)
+             if _whole_phrase_match(query, str(col))),
+            None,
+        )
+
+        # Dataset-aware aliases: use them only if their destination exists.
+        if requested_column is None:
+            mean_aliases = {
+                "revenue": "Total Revenue", "sales": "Total Revenue",
+                "profit": "Total Profit", "cost": "Total Cost",
+                "units": "Units Sold", "quantity": "Units Sold",
+            }
+            for alias, destination in sorted(mean_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+                if destination in columns and _whole_phrase_match(query, alias):
+                    requested_column = destination
+                    break
+
+        if requested_column is None:
+            # Explicitly tell the execution layer not to substitute another
+            # available column for the metric the user requested.
+            return [
+                "STOP: The user requested a mean/average for a metric that is not present as a dataset column. Do not calculate a different metric. Return an unsupported-metric response naming the requested metric and listing available columns."
+            ]
+
+        return [
+            f"Calculate the arithmetic mean of the numeric values in '{requested_column}' using the dataset, excluding missing values; report the metric name, mean, valid-value count, and dataset row count.",
+            f"Validate the reported mean for '{requested_column}' against the direct numeric mean computed from the source dataset."
         ]
 
     # ==================================================

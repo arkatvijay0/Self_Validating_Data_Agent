@@ -1,5 +1,6 @@
 
 import math
+import re
 import pandas as pd
 
 
@@ -568,6 +569,106 @@ def generate_missing_values_insight(dataset_path):
 # MAIN INSIGHT GENERATOR
 # ============================================================
 
+
+def generate_conversion_factor_insight(result):
+    """Summarize validated conversion-factor results without causal claims."""
+    def find_result(obj, depth=0):
+        if depth > 6 or not isinstance(obj, dict):
+            return None
+        if (
+            obj.get("analysis_type") == "conversion_factor_analysis"
+            and isinstance(obj.get("categorical_factor_results"), dict)
+            and isinstance(obj.get("numeric_factor_results"), dict)
+        ):
+            return obj
+        for key in (
+            "primary_result", "result", "supporting_result",
+            "evidence", "validated_analysis_result"
+        ):
+            found = find_result(obj.get(key), depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    data = find_result(result)
+    if data is None:
+        return (
+            "Conversion-factor insights could not be generated because "
+            "the validated categorical and numeric factor results were unavailable."
+        )
+
+    total = data.get("valid_target_records", data.get("total_dataset_records"))
+    converted = data.get("converted_count")
+    rate = data.get("overall_conversion_rate_percent")
+    if not isinstance(total, (int, float)) or not isinstance(converted, (int, float)) \
+            or not isinstance(rate, (int, float)) or total <= 0:
+        return "Conversion-factor insights could not be generated because the overall conversion metrics are invalid."
+
+    sentences = [
+        f"The dataset contains {int(total):,} valid customer records, of which "
+        f"{int(converted):,} converted, giving an overall conversion rate of {rate:.2f}%."
+    ]
+
+    candidates = []
+    for column, groups in data["categorical_factor_results"].items():
+        if not isinstance(groups, list):
+            continue
+        eligible = [
+            g for g in groups
+            if isinstance(g, dict)
+            and g.get("eligible_for_comparison", True)
+            and isinstance(g.get("conversion_rate_percent"), (int, float))
+            and isinstance(g.get("records"), (int, float))
+            and g.get("records", 0) > 0
+        ]
+        if len(eligible) >= 2:
+            eligible.sort(key=lambda g: g["conversion_rate_percent"], reverse=True)
+            high, low = eligible[0], eligible[-1]
+            candidates.append((
+                high["conversion_rate_percent"] - low["conversion_rate_percent"],
+                column, high, low
+            ))
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    for _, column, high, low in candidates[:4]:
+        sentences.append(
+            f"For {column}, the highest observed group was '{high['group']}' "
+            f"at {high['conversion_rate_percent']:.2f}% "
+            f"(n={int(high['records']):,}), while '{low['group']}' was "
+            f"{low['conversion_rate_percent']:.2f}% "
+            f"(n={int(low['records']):,})."
+        )
+
+    numeric_candidates = []
+    for column, groups in data["numeric_factor_results"].items():
+        if not isinstance(groups, list):
+            continue
+        eligible = [
+            g for g in groups
+            if isinstance(g, dict)
+            and g.get("eligible_for_comparison", True)
+            and isinstance(g.get("conversion_rate_percent"), (int, float))
+            and isinstance(g.get("records"), (int, float))
+            and g.get("records", 0) > 0
+        ]
+        if len(eligible) >= 2:
+            eligible.sort(key=lambda g: g["conversion_rate_percent"], reverse=True)
+            numeric_candidates.append((eligible[0]["conversion_rate_percent"], column, eligible[0]))
+
+    numeric_candidates.sort(reverse=True)
+    for rate_value, column, group in numeric_candidates[:2]:
+        sentences.append(
+            f"For numeric factor {column}, group '{group['group']}' had an observed "
+            f"conversion rate of {rate_value:.2f}% (n={int(group['records']):,})."
+        )
+
+    sentences.append(
+        "These are observational associations, not proof of causation. "
+        "Call duration is measured after contact and should not be treated as "
+        "a pre-contact targeting feature."
+    )
+    return " ".join(sentences)
+
 def generate_insight(user_question, result, task_analysis, dataset_path=None):
     """
     Generate a natural-language insight.
@@ -584,6 +685,24 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
         ).lower()
     else:
         task_type = str(task_analysis or "").lower()
+
+    # Dedicated route for validated conversion-factor analysis.
+    result_type = (
+        str(result.get("analysis_type", "")).lower()
+        if isinstance(result, dict) else ""
+    )
+    if (
+        result_type == "conversion_factor_analysis"
+        or task_type == "conversion_factor_analysis"
+        or (
+            "conversion" in question_lower
+            and any(term in question_lower for term in
+                    ("factor", "associated", "patterns", "influence"))
+            and isinstance(result, dict)
+            and isinstance(result.get("categorical_factor_results"), dict)
+        )
+    ):
+        return generate_conversion_factor_insight(result)
 
     # Answer data-quality questions directly from the source dataset.
     missing_value_terms = (
@@ -634,6 +753,91 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
         if dataset_path:
             return generate_conversion_insight(dataset_path)
         return "Conversion analysis requires the dataset path to independently verify conversion and y values."
+
+    # Handle specific mean/average questions before the generic dataset summary.
+    mean_terms = ("average", "avg", "mean")
+    is_mean_question = any(re.search(r"\b" + re.escape(term) + r"\b", question_lower) for term in mean_terms)
+    if is_mean_question:
+        # The dataset is the source of truth for both column existence and calculation.
+        if dataset_path:
+            try:
+                source_df = pd.read_csv(dataset_path)
+            except Exception as error:
+                return f"The requested average could not be calculated because the dataset could not be read: {error}"
+
+            # Resolve only whole-word column-name matches, avoiding false matches such as
+            # 'age' in 'average' and 'y' in 'salary'.
+            requested_column = None
+            normalized_question = re.sub(r"[_\-]+", " ", question_lower)
+            for column in source_df.columns:
+                normalized_column = re.sub(r"[_\-]+", " ", str(column).lower()).strip()
+                if normalized_column and re.search(r"(?<![a-z0-9])" + re.escape(normalized_column) + r"(?![a-z0-9])", normalized_question):
+                    requested_column = column
+                    break
+
+            # Small, explicit aliases for common customer-data wording.
+            if requested_column is None:
+                aliases = {
+                    "customer age": "age",
+                    "age of customers": "age",
+                    "customers age": "age",
+                    "call duration": "duration",
+                    "duration of calls": "duration",
+                }
+                for phrase, column_name in aliases.items():
+                    if phrase in normalized_question and column_name in source_df.columns:
+                        requested_column = column_name
+                        break
+
+            if requested_column is None:
+                return (
+                    "I cannot calculate the requested average because the dataset does not contain "
+                    "a clearly identified column for that metric. Please ask for a column that exists "
+                    "in the dataset."
+                )
+
+            values = pd.to_numeric(source_df[requested_column], errors="coerce").dropna()
+            if values.empty:
+                return f"I cannot calculate the average of '{requested_column}' because it has no valid numeric values."
+
+            # Apply a month filter when the question names one and the dataset has a month column.
+            month_codes = {
+                "january": "jan", "february": "feb", "march": "mar", "april": "apr",
+                "may": "may", "june": "jun", "july": "jul", "august": "aug",
+                "september": "sep", "october": "oct", "november": "nov", "december": "dec",
+            }
+            selected_month = next((month for month in month_codes if re.search(r"\b" + month + r"\b", question_lower)), None)
+            filtered_rows = len(source_df)
+            if selected_month and "month" in source_df.columns:
+                month_values = source_df["month"].astype("string").str.strip().str.lower()
+                filtered_df = source_df.loc[month_values.isin([month_codes[selected_month], selected_month])]
+                values = pd.to_numeric(filtered_df[requested_column], errors="coerce").dropna()
+                filtered_rows = len(filtered_df)
+                if values.empty:
+                    return f"No valid values for '{requested_column}' were found for {selected_month.title()}."
+                return (
+                    f"The average {str(requested_column).replace('_', ' ')} for {selected_month.title()} is "
+                    f"{values.mean():,.2f}, based on {len(values):,} valid observations "
+                    f"across {filtered_rows:,} rows matching that month."
+                )
+
+            return (
+                f"The average {str(requested_column).replace('_', ' ')} is {values.mean():,.2f}, "
+                f"based on {len(values):,} valid numeric observations."
+            )
+
+        # Without a dataset path, use a numeric result only when one was actually supplied.
+        raw_value = result
+        if isinstance(result, dict):
+            for key in ("mean", "average", "mean_value", "average_value", "mean_duration", "value"):
+                if key in result:
+                    raw_value = result[key]
+                    break
+        value = safe_float(raw_value)
+        if value is not None:
+            return f"The calculated average is {format_number(value)}."
+
+        return "The requested average could not be verified because the dataset path or a numeric mean result was not supplied."
 
     # Descriptive analysis.
     if (

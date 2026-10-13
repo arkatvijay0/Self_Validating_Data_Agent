@@ -505,6 +505,10 @@ def create_final_report(
             recommendation
         )
 
+    elif isinstance(recommendation, str) and recommendation.strip():
+        # A non-empty plain-text recommendation was generated successfully.
+        recommendation_status = "PASS"
+
     report_lines.append(
         f"Recommendation Status: "
         f"{recommendation_status}"

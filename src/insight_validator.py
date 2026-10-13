@@ -1163,6 +1163,210 @@ def validate_conversion_insight(insight, result):
     }
 
 
+
+
+# ==========================================================
+# DESCRIPTIVE SUMMARY VALIDATION
+# ==========================================================
+
+def validate_descriptive_summary_claims(insight, result):
+    """
+    Validate dataset-size and data-quality claims against independent evidence.
+    This is deliberately conservative: it validates claims we can verify from
+    dataset_facts and does not treat generic presence checks as factual proof.
+    """
+    facts = None
+    if isinstance(result, dict):
+        supporting = result.get("supporting_result")
+        if isinstance(supporting, dict):
+            facts = supporting.get("dataset_facts")
+        if facts is None:
+            facts = result.get("dataset_facts")
+
+    if not isinstance(facts, dict):
+        return {
+            "pass": False,
+            "overall": "FAIL",
+            "checks": {},
+            "reason": "Independent dataset facts are missing; descriptive claims cannot be verified."
+        }
+
+    text = str(insight or "")
+    checks = {}
+    patterns = [
+        (
+            "row_count",
+            r"(?:dataset contains|contains|has|with)\s+([\d,]+)\s+rows",
+            "row_count",
+        ),
+        (
+            "column_count",
+            r"(?:and\s+)?([\d,]+)\s+columns",
+            "column_count",
+        ),
+        (
+            "missing_cells",
+            r"([\d,]+)\s+missing cells",
+            "missing_cells",
+        ),
+        (
+            "duplicate_rows",
+            r"([\d,]+)\s+(?:exact\s+)?duplicate rows",
+            "duplicate_rows",
+        ),
+    ]
+
+    for check_name, pattern, fact_key in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                claimed = int(match.group(1).replace(",", ""))
+                actual = int(facts.get(fact_key))
+                checks[check_name] = {
+                    "pass": claimed == actual,
+                    "claimed": claimed,
+                    "actual": actual,
+                }
+            except (TypeError, ValueError):
+                checks[check_name] = {
+                    "pass": False,
+                    "claimed": match.group(1),
+                    "actual": facts.get(fact_key),
+                    "reason": "Independent fact is missing or not numeric.",
+                }
+
+    # Validate top categorical values when the insight uses the exact
+    # "most common ... is VALUE" / "largest ... group is VALUE" wording.
+    categorical = facts.get("categorical_summary", {})
+    if isinstance(categorical, dict):
+        for column, entries in categorical.items():
+            if not isinstance(entries, list) or not entries:
+                continue
+            top_value = str(entries[0].get("value", "")) if isinstance(entries[0], dict) else ""
+            if not top_value:
+                continue
+            value_pattern = re.compile(
+                r"(?:most common|most frequent|largest)\s+"
+                + re.escape(str(column))
+                + r"\s+(?:category|group|value)?\s*(?:is|was|:)\s*"
+                + re.escape(top_value),
+                re.IGNORECASE,
+            )
+            if value_pattern.search(text):
+                checks[f"top_category_{column}"] = {
+                    "pass": True,
+                    "claimed": top_value,
+                    "actual": top_value,
+                }
+
+    failed = [name for name, item in checks.items() if not item.get("pass", False)]
+    passed = bool(checks) and not failed
+    return {
+        "pass": passed,
+        "overall": "PASS" if passed else "FAIL",
+        "checks": checks,
+        "verified_claims": len(checks) - len(failed),
+        "failed_claims": len(failed),
+        "reason": None if passed else (
+            "No verifiable descriptive claims were found, or one or more claims "
+            "did not match independently computed dataset facts."
+        ),
+    }
+
+
+
+def validate_conversion_factor_insight(insight, result):
+    """Validate that factor-analysis insights use metrics present in the result."""
+    def find_result(obj, depth=0):
+        if depth > 7 or not isinstance(obj, dict):
+            return None
+        if (
+            obj.get("analysis_type") == "conversion_factor_analysis"
+            and isinstance(obj.get("categorical_factor_results"), dict)
+            and isinstance(obj.get("numeric_factor_results"), dict)
+        ):
+            return obj
+        for key in (
+            "primary_result", "result", "supporting_result", "evidence",
+            "validated_analysis_result"
+        ):
+            found = find_result(obj.get(key), depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    data = find_result(result)
+    text = str(insight or "")
+    lower = text.lower()
+    if data is None:
+        return {
+            "pass": False,
+            "status": "FAIL",
+            "reason": "Validated conversion-factor result structure is missing."
+        }
+
+    total = data.get("valid_target_records", data.get("total_dataset_records"))
+    converted = data.get("converted_count")
+    rate = data.get("overall_conversion_rate_percent")
+    checks = {
+        "factor_results_present": bool(
+            data["categorical_factor_results"] or data["numeric_factor_results"]
+        ),
+        "overall_metrics_valid": (
+            isinstance(total, (int, float)) and total > 0
+            and isinstance(converted, (int, float))
+            and isinstance(rate, (int, float))
+            and 0 <= converted <= total and 0 <= rate <= 100
+        ),
+        "overall_rate_claim_present": (
+            isinstance(rate, (int, float))
+            and re.search(r"(?<![\w.])" + re.escape(f"{rate:.2f}") + r"\s*%", text) is not None
+        ),
+        "factor_patterns_described": any(
+            term in lower for term in
+            ("factor", "group", "conversion rate", "conversion rates", "associated")
+        ),
+        "causal_language_qualified": (
+            "observational" in lower or "not proof of causation" in lower
+        ),
+    }
+
+    # Verify every percentage claim that exactly matches a known factor rate
+    # is sourced from the calculated result. Require at least one group rate
+    # to be mentioned in addition to the overall conversion rate.
+    known_rates = set()
+    for groups in list(data["categorical_factor_results"].values()) + \
+                  list(data["numeric_factor_results"].values()):
+        if isinstance(groups, list):
+            for group in groups:
+                if isinstance(group, dict):
+                    value = group.get("conversion_rate_percent")
+                    if isinstance(value, (int, float)):
+                        known_rates.add(round(float(value), 2))
+
+    mentioned_rates = {
+        float(match)
+        for match in re.findall(r"(?<![\w.])(\d{1,3}(?:\.\d+)?)\s*%", text)
+    }
+    checks["factor_rates_supported"] = bool(mentioned_rates.intersection(known_rates))
+    checks["no_unsupported_percentage_claims"] = all(
+        value == round(float(rate), 2) or value in known_rates
+        for value in mentioned_rates
+    ) if isinstance(rate, (int, float)) else False
+
+    passed = all(checks.values())
+    return {
+        "pass": passed,
+        "status": "PASS" if passed else "FAIL",
+        "checks": checks,
+        "reason": None if passed else
+            "One or more conversion-factor insight claims failed deterministic validation.",
+        "validated_target": data.get("target_column"),
+        "overall_conversion_rate_percent": rate,
+        "known_factor_rate_count": len(known_rates),
+        "mentioned_percentage_values": sorted(mentioned_rates),
+    }
+
 # ==========================================================
 # MAIN VALIDATOR
 # ==========================================================
@@ -1239,12 +1443,69 @@ def validate_insight(
         result=result
     )
 
+    # Descriptive summaries need independent dataset facts. Do this before
+    # auto-detecting nested conversion metrics, otherwise an unrelated nested
+    # metric dictionary can force a conversion-rate validator onto a general
+    # descriptive insight.
+    if "descriptive_summary" in analysis or "descriptive_summary" in task_type:
+        task_validation = validate_descriptive_summary_claims(insight, result)
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "descriptive_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
+
+    if (
+        "conversion_factor_analysis" in analysis
+        or "conversion_factor_analysis" in task_type
+        or (
+            isinstance(result, dict)
+            and result.get("analysis_type") == "conversion_factor_analysis"
+        )
+    ):
+        task_validation = validate_conversion_factor_insight(insight, result)
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "conversion_factor_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
+
     conversion_metrics = _find_conversion_metrics(result)
     conversion_requested = (
-        "conversion rate" in question
+        "conversion_factor_analysis" in analysis
+        or "conversion_factor_analysis" in task_type
+        or "conversion rate" in question
         or "converted customers" in question
         or "non-converted" in question
-        or conversion_metrics is not None
+        or (
+            "conversion" in question
+            and any(
+                term in question
+                for term in ("factor", "associated", "patterns", "influence")
+            )
+        )
     )
     if conversion_requested and conversion_metrics is not None:
         task_validation = validate_conversion_insight(insight, result)
@@ -1289,6 +1550,22 @@ def validate_insight(
         check_name = (
             "claim_level_validation"
         )
+
+    # ------------------------------------------------------
+    # GROUPED BALANCE CONVERSION RATE
+    # Check the validated result type before the broad
+    # relationship-analysis routing below.
+    # ------------------------------------------------------
+
+    if (
+        isinstance(result, dict)
+        and result.get("analysis_type") == "grouped_conversion_rate_by_balance"
+    ):
+        task_validation = validate_grouped_insight(
+            insight,
+            result
+        )
+        check_name = "grouped"
 
     # ------------------------------------------------------
     # CORRELATION / RELATIONSHIP

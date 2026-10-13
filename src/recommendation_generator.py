@@ -201,10 +201,28 @@ def generate_mean_recommendation(evidence):
             "reason": "Evidence validation did not pass."
         }
 
-    # Some pipeline versions wrap the numerical result in "evidence".
-    nested = evidence.get("evidence")
-    details = nested if isinstance(nested, dict) else {}
-    sources = [evidence, details]
+    # Pipeline versions may wrap the validated result at different levels.
+    # Read only known result containers; do not infer numeric values.
+    sources = []
+    container_keys = (
+        "primary_result",
+        "result",
+        "supporting_result",
+        "evidence",
+        "validated_result",
+    )
+
+    def collect_sources(obj, depth=0):
+        if depth > 5 or not isinstance(obj, dict):
+            return
+        if obj not in sources:
+            sources.append(obj)
+        for key in container_keys:
+            child = obj.get(key)
+            if isinstance(child, dict):
+                collect_sources(child, depth + 1)
+
+    collect_sources(evidence)
 
     def first_present(*keys):
         for source in sources:
@@ -233,7 +251,11 @@ def generate_mean_recommendation(evidence):
                 "mean_duration, average, or average_value."
             ),
             "available_keys": sorted(
-                set(evidence.keys()).union(details.keys())
+                {
+                    key
+                    for source in sources
+                    for key in source.keys()
+                }
             )
         }
 

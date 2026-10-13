@@ -16,18 +16,17 @@ def validate_code(execution_result):
             "reason": "Execution result is None",
         }
 
-    if execution_result.get("status") == "FAIL":
-        error = execution_result.get("error")
-
-        return {
-            "pass": False,
-            "reason": str(error)[:500] if error else "Code execution failed",
-        }
-
-    if execution_result.get("success") is False:
+    # Preserve the most specific execution error for the
+    # self-correction loop. execute_generated_code() stores
+    # runtime errors in "stderr", including when status="FAIL".
+    if (
+        execution_result.get("status") == "FAIL"
+        or execution_result.get("success") is False
+    ):
         error = (
             execution_result.get("stderr")
             or execution_result.get("error")
+            or execution_result.get("exception")
             or "Code execution failed"
         )
 

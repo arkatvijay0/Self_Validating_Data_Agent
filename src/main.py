@@ -878,6 +878,42 @@ def get_primary_result(
 # CREATE EVIDENCE
 # =========================================================
 
+def build_job_conversion_rate_series(filepath):
+    """Compute conversion rates per job category directly from the uploaded dataset."""
+    frame = pd.read_csv(filepath)
+    if "job" not in frame.columns:
+        return None
+
+    if "conversion" in frame.columns:
+        outcome = pd.to_numeric(frame["conversion"], errors="coerce")
+        converted = outcome.eq(1)
+        valid = outcome.isin([0, 1])
+    elif "y" in frame.columns:
+        labels = frame["y"].astype(str).str.strip().str.lower()
+        converted = labels.eq("yes")
+        valid = labels.isin(["yes", "no"])
+    else:
+        return None
+
+    work = frame.loc[valid & frame["job"].notna(), ["job"]].copy()
+    work["_converted"] = converted.loc[work.index].astype(int)
+    grouped = work.groupby("job", dropna=False)["_converted"].agg(["sum", "count"])
+    grouped["conversion_rate_percent"] = grouped["sum"] / grouped["count"] * 100
+    grouped = grouped.sort_values("conversion_rate_percent", ascending=False)
+    rates = grouped["conversion_rate_percent"].round(4)
+    rates.name = "Conversion Rate (%)"
+    # Preserve counts for the evidence payload without changing the Series API.
+    rates.attrs["grouped_counts"] = {
+        str(category): {
+            "converted_count": int(row["sum"]),
+            "total_count": int(row["count"]),
+            "conversion_rate_percent": round(float(row["conversion_rate_percent"]), 4)
+        }
+        for category, row in grouped.iterrows()
+    }
+    return rates
+
+
 def create_evidence(
     analysis_type,
     primary_result,
@@ -890,6 +926,79 @@ def create_evidence(
     analysis_type = str(
         analysis_type
     ).lower()
+
+    # Preserve the real conversion-factor result; do not send it to
+    # the legacy Pearson correlation or sales/profit evidence branches.
+    if (
+        analysis_type == "conversion_factor_analysis"
+        or (
+            isinstance(primary_result, dict)
+            and primary_result.get("analysis_type") == "conversion_factor_analysis"
+        )
+    ):
+        valid_result = (
+            isinstance(primary_result, dict)
+            and isinstance(primary_result.get("categorical_factor_results"), dict)
+            and isinstance(primary_result.get("numeric_factor_results"), dict)
+            and isinstance(primary_result.get("overall_conversion_rate_percent"), (int, float))
+        )
+        evidence_payload = safe_json_value(primary_result)
+        return {
+            "status": "PASS" if valid_result else "FAIL",
+            "analysis_type": "conversion_factor_analysis",
+            "target_column": primary_result.get("target_column") if isinstance(primary_result, dict) else None,
+            "supporting_result": evidence_payload,
+            "result": evidence_payload,
+            "evidence_summary": json.dumps(
+                evidence_payload, indent=2, ensure_ascii=False
+            ),
+            "reason": None if valid_result else
+                "Validated conversion-factor result is missing required fields.",
+        }
+
+    # -----------------------------------------------------
+    # GROUPED CONVERSION RATE
+    # -----------------------------------------------------
+    if (
+        dataset_path
+        and grouped_series is not None
+        and str(getattr(grouped_series, "name", "")).lower() == "conversion rate (%)"
+    ):
+        grouped_evidence = create_grouped_evidence(
+            grouped_series,
+            "job",
+            "Conversion Rate (%)",
+            "conversion_rate"
+        )
+        supporting = {
+            "grouped_result": safe_json_value(grouped_series),
+            "grouped_counts": safe_json_value(grouped_series.attrs.get("grouped_counts", {})),
+            "top_category": str(grouped_series.index[0]) if len(grouped_series) else None,
+            "top_conversion_rate_percent": float(grouped_series.iloc[0]) if len(grouped_series) else None,
+        }
+        if isinstance(grouped_evidence, dict):
+            grouped_evidence["analysis_type"] = "grouped_analysis"
+            grouped_evidence["category"] = str(primary_result.get("group_column", "job"))
+            grouped_evidence["metric"] = "Conversion Rate (%)"
+            grouped_evidence["operation"] = "conversion_rate"
+            grouped_evidence["supporting_result"] = supporting
+            grouped_evidence["result"] = safe_json_value(supporting)
+            grouped_evidence["evidence_summary"] = json.dumps(
+                safe_json_value(supporting), indent=2, ensure_ascii=False
+            )
+            grouped_evidence.setdefault("reason", None)
+            return grouped_evidence
+        return {
+            "status": "PASS" if len(grouped_series) > 0 else "FAIL",
+            "analysis_type": "grouped_analysis",
+            "category": str(primary_result.get("group_column", "job")),
+            "metric": "Conversion Rate (%)",
+            "operation": "conversion_rate",
+            "supporting_result": supporting,
+            "result": safe_json_value(supporting),
+            "evidence_summary": json.dumps(safe_json_value(supporting), indent=2, ensure_ascii=False),
+            "reason": None if len(grouped_series) > 0 else "No valid job categories were available."
+        }
 
     # -----------------------------------------------------
     # COMPARISON
@@ -1041,6 +1150,45 @@ def generate_pipeline_insight(
         )
     ).lower()
 
+    # A specific grouped conversion-rate question must not be routed to the
+    # generic conversion insight, which reports only the overall dataset rate.
+    if (
+        grouped_series is not None
+        and str(getattr(grouped_series, "name", "")).strip().lower() == "conversion rate (%)"
+    ):
+        counts = getattr(grouped_series, "attrs", {}).get("grouped_counts", {})
+        if len(grouped_series) == 0:
+            return "No valid job categories were available to compare conversion rates."
+
+        top_category = str(grouped_series.index[0])
+        top_rate = float(grouped_series.iloc[0])
+        top_counts = counts.get(top_category, {}) if isinstance(counts, dict) else {}
+        converted = top_counts.get("converted_count")
+        total = top_counts.get("total_count")
+
+        if len(grouped_series) > 1:
+            second_category = str(grouped_series.index[1])
+            second_rate = float(grouped_series.iloc[1])
+            second_counts = counts.get(second_category, {}) if isinstance(counts, dict) else {}
+            second_converted = second_counts.get("converted_count")
+            second_total = second_counts.get("total_count")
+            second_detail = (
+                f" The second-highest category is {second_category} at {second_rate:.2f}%"
+                + (f" ({second_converted:,} converted out of {second_total:,} customers)."
+                   if second_converted is not None and second_total is not None else ".")
+            )
+        else:
+            second_detail = ""
+
+        top_detail = (
+            f" ({converted:,} converted out of {total:,} customers)"
+            if converted is not None and total is not None else ""
+        )
+        return (
+            f"The {primary_result.get('group_column', 'requested')} group with the highest conversion rate is {top_category} at {top_rate:.2f}%{top_detail}."
+            f"{second_detail} These are descriptive rates in the uploaded dataset and do not establish causation."
+        )
+
     if (
         task_type == "comparison"
         and
@@ -1075,6 +1223,29 @@ def generate_pipeline_recommendation(
     task_analysis,
     evidence
 ):
+
+    # Avoid sales-specific fallback wording (for example, "second-highest region")
+    # for job-category conversion analysis.
+    if (
+        grouped_series is not None
+        and str(getattr(grouped_series, "name", "")).strip().lower() == "conversion rate (%)"
+        and len(grouped_series) > 0
+    ):
+        top_category = str(grouped_series.index[0])
+        top_rate = float(grouped_series.iloc[0])
+        counts = getattr(grouped_series, "attrs", {}).get("grouped_counts", {})
+        top_counts = counts.get(top_category, {}) if isinstance(counts, dict) else {}
+        converted = top_counts.get("converted_count")
+        total = top_counts.get("total_count")
+        count_detail = (
+            f" ({converted:,} converted out of {total:,} customers)"
+            if converted is not None and total is not None else ""
+        )
+        return (
+            f"Consider further analysis of the {top_category} group for {primary_result.get('group_column', 'the requested factor')}, which has the highest observed "
+            f"conversion rate at {top_rate:.2f}%{count_detail}. Compare sample sizes and customer characteristics "
+            "before allocating resources; this descriptive association does not establish causation."
+        )
 
     try:
 
@@ -1152,26 +1323,12 @@ def generate_pipeline_recommendation(
 
 def main(dataset_path=None, user_question=None):
 
-    # Use the dataset and question supplied by app.py when available.
-    # Preserve command-line behavior when main() is run directly.
-    active_dataset_path = (
-        os.path.abspath(os.fspath(dataset_path))
-        if dataset_path is not None and str(dataset_path).strip()
-        else DATA_PATH
-    )
-
-    if not os.path.isfile(active_dataset_path):
-        raise FileNotFoundError(
-            f"Dataset file was not found: {active_dataset_path}"
-        )
-
-    if user_question is None:
-        user_question = input("\nEnter your analysis question: ").strip()
+    # Use the dataset supplied by Streamlit when present; retain the default
+    # sales dataset for standalone command-line runs.
+    if dataset_path:
+        DATA_PATH = os.path.abspath(str(dataset_path))
     else:
-        user_question = str(user_question).strip()
-
-    if not user_question:
-        raise ValueError("Please enter a non-empty analysis question.")
+        DATA_PATH = os.path.join(PROJECT_ROOT, "data", "raw", "sales.csv")
 
     print_section(
         "SELF-VALIDATING EDA AGENT"
@@ -1179,7 +1336,7 @@ def main(dataset_path=None, user_question=None):
 
     print(
         "Dataset:",
-        active_dataset_path
+        DATA_PATH
     )
 
     # =====================================================
@@ -1191,7 +1348,7 @@ def main(dataset_path=None, user_question=None):
     )
 
     data_profile = profile_dataset(
-        active_dataset_path
+        DATA_PATH
     )
 
     dataset_columns = extract_dataset_columns(
@@ -1221,9 +1378,13 @@ def main(dataset_path=None, user_question=None):
         "STEP 2 - TASK ANALYSIS"
     )
 
-    user_question = input(
-        "\nEnter your analysis question: "
-    ).strip()
+    if user_question is None:
+        user_question = input("\nEnter your analysis question: ").strip()
+    else:
+        user_question = str(user_question).strip()
+
+    if not user_question:
+        raise ValueError("Please enter a non-empty analysis question.")
 
     print(
         "User Question:"
@@ -1310,7 +1471,7 @@ def main(dataset_path=None, user_question=None):
     )
 
     step_executor = create_self_correcting_executor(
-        filepath=active_dataset_path,
+        filepath=DATA_PATH,
         data_profile=data_profile,
         dataset_columns=dataset_columns,
         target_columns=target_columns,
@@ -1411,7 +1572,7 @@ def main(dataset_path=None, user_question=None):
     primary_result, execution_results = sanitize_identifier_statistics(
         primary_result,
         execution_results,
-        active_dataset_path
+        DATA_PATH
     )
 
     print(
@@ -1431,8 +1592,120 @@ def main(dataset_path=None, user_question=None):
 
     grouped_series = build_grouped_series(
         execution_results,
-        active_dataset_path
+        DATA_PATH
     )
+
+    # Calculate grouped conversion rates for explicitly requested factors.
+    question_lower = str(user_question or "").lower()
+    requested_group = None
+
+    columns = set(pd.read_csv(DATA_PATH, nrows=0).columns)
+
+    group_aliases = {
+        "account balance": "balance",
+        "balance": "balance",
+        "job": "job",
+        "education": "education",
+        "marital": "marital",
+        "housing": "housing",
+        "loan": "loan",
+        "month": "month",
+        "contact": "contact",
+        "poutcome": "poutcome",
+    }
+
+    for phrase in sorted(group_aliases, key=len, reverse=True):
+        column = group_aliases[phrase]
+        if phrase in question_lower and column in columns:
+            requested_group = column
+            break
+
+    if (
+        requested_group
+        and ("conversion rate" in question_lower
+             or "conversion rates" in question_lower)
+    ):
+        if requested_group == "balance":
+            from src.bank_conversion_analysis import (
+                calculate_conversion_rate_by_group,
+            )
+
+            grouped_series = calculate_conversion_rate_by_group(
+                DATA_PATH,
+                "balance",
+                bins=[
+                    -float("inf"), 0, 1000, 5000, 10000, float("inf")
+                ],
+                labels=[
+                    "Negative", "0-1,000", "1,001-5,000",
+                    "5,001-10,000", "Above 10,000"
+                ],
+            )["conversion_rate_percent"]
+
+            # Preserve exact counts for report evidence.
+            grouped_result = calculate_conversion_rate_by_group(
+                DATA_PATH,
+                "balance",
+                bins=[
+                    -float("inf"), 0, 1000, 5000, 10000, float("inf")
+                ],
+                labels=[
+                    "Negative", "0-1,000", "1,001-5,000",
+                    "5,001-10,000", "Above 10,000"
+                ],
+            )
+            grouped_series.attrs["grouped_counts"] = {
+                str(index): {
+                    "converted_count": int(row["converted"]),
+                    "total_count": int(row["customers"]),
+                }
+                for index, row in grouped_result.iterrows()
+            }
+            grouped_series = grouped_series.sort_values(ascending=False)
+            grouped_series.name = "conversion rate (%)"
+
+            top_category = str(grouped_series.index[0])
+            top_counts = grouped_series.attrs["grouped_counts"][top_category]
+
+            primary_result = {
+                "status": "PASS",
+                "analysis_type": "grouped_conversion_rate_by_balance",
+                "group_column": "balance",
+                "metric": "conversion_rate_percent",
+                "top_category": top_category,
+                "top_conversion_rate_percent": float(grouped_series.iloc[0]),
+                "converted_count": top_counts["converted_count"],
+                "total_count": top_counts["total_count"],
+                "grouped_result": safe_json_value(grouped_series),
+                "grouped_counts": safe_json_value(
+                    grouped_series.attrs["grouped_counts"]
+                ),
+            }
+
+        elif requested_group == "job":
+            grouped_series = build_job_conversion_rate_series(DATA_PATH)
+
+            if grouped_series is not None and len(grouped_series) > 0:
+                counts = getattr(grouped_series, "attrs", {}).get(
+                    "grouped_counts", {}
+                )
+                top_category = str(grouped_series.index[0])
+                top_counts = counts.get(top_category, {})
+
+                primary_result = {
+                    "status": "PASS",
+                    "analysis_type": "grouped_conversion_rate_by_job",
+                    "group_column": "job",
+                    "metric": "conversion_rate_percent",
+                    "top_category": top_category,
+                    "top_conversion_rate_percent": round(
+                        float(grouped_series.iloc[0]), 4
+                    ),
+                    "converted_count": top_counts.get("converted_count"),
+                    "total_count": top_counts.get("total_count"),
+                    "grouped_result": safe_json_value(grouped_series),
+                    "grouped_counts": safe_json_value(counts),
+                }
 
     print(
         "\nGrouped Series Used for Insight:"
@@ -1454,18 +1727,23 @@ def main(dataset_path=None, user_question=None):
     # ANALYSIS TYPE
     # =====================================================
 
-    analysis_type = (
-        task_analysis.get(
-            "task_type",
-            "general_analysis"
-        )
-        if isinstance(
-            task_analysis,
-            dict
-        )
-        else
-        "general_analysis"
+    result_analysis_type = (
+        primary_result.get("analysis_type", "")
+        if isinstance(primary_result, dict)
+        else ""
     )
+
+    if str(result_analysis_type).lower() == "conversion_factor_analysis":
+        analysis_type = "conversion_factor_analysis"
+    else:
+        analysis_type = (
+            task_analysis.get(
+                "task_type",
+                "general_analysis"
+            )
+            if isinstance(task_analysis, dict)
+            else "general_analysis"
+        )
 
     # =====================================================
     # STEP 6 - INSIGHT GENERATION
@@ -1480,7 +1758,7 @@ def main(dataset_path=None, user_question=None):
         primary_result=primary_result,
         grouped_series=grouped_series,
         task_analysis=task_analysis,
-        dataset_path=active_dataset_path
+        dataset_path=DATA_PATH
     )
 
     print(
@@ -1552,8 +1830,25 @@ def main(dataset_path=None, user_question=None):
         grouped_series=grouped_series,
         execution_results=execution_results,
         data_profile=data_profile,
-        dataset_path=active_dataset_path
+        dataset_path=DATA_PATH
     )
+
+    # Descriptive-summary claim validation requires independently computed
+    # dataset facts, which are supplied by create_evidence(). The initial
+    # Step 7 call only has primary_result, so rerun this validator now that
+    # the evidence object is available.
+    if str(analysis_type).lower() == "descriptive_summary":
+        insight_validation = validate_insight(
+            insight=insight,
+            result=evidence,
+            analysis_type=analysis_type,
+            task_analysis=task_analysis,
+            user_question=user_question,
+            data_profile=data_profile
+        )
+
+        print("\nInsight Validation Result (using independent evidence):")
+        print_json(insight_validation)
 
     print(
         "Evidence:"
@@ -1651,9 +1946,16 @@ def main(dataset_path=None, user_question=None):
         "\nFinal Report:"
     )
 
-    print(
-        final_report
-    )
+    try:
+        print(final_report)
+    except UnicodeEncodeError:
+        # Keep the saved report intact even if the Windows console encoding
+        # cannot display a Unicode character.
+        safe_report = str(final_report).encode(
+            sys.stdout.encoding or "utf-8",
+            errors="replace"
+        ).decode(sys.stdout.encoding or "utf-8", errors="replace")
+        print(safe_report)
 
     print(
         "\nReport saved to:"
