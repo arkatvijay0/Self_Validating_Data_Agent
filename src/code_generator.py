@@ -1210,6 +1210,75 @@ result = {{
         return code
 
 # ============================================================
+# ========================================================
+    # GENERAL ROW COUNT
+    # ========================================================
+    if any(
+        phrase in step_lower
+        for phrase in (
+            "count the records",
+            "count records",
+            "number of records",
+            "number of rows",
+            "count the rows",
+            "count rows",
+            "how many rows",
+            "how many records",
+            "row count",
+            "record count",
+        )
+    ):
+        code += """
+result = {
+    "status": "PASS",
+    "analysis_type": "row_count",
+    "row_count": int(len(df)),
+    "dataset_row_count": int(len(df)),
+}
+"""
+        return code
+
+    # ========================================================
+    # GENERAL DATASET SUMMARY
+    # ========================================================
+    if (
+        "summarize" in step_lower
+        or "summarise" in step_lower
+        or "summary" in step_lower
+    ) and any(
+        word in step_lower
+        for word in ("dataset", "data", "structure", "characteristics", "overview")
+    ):
+        code += """
+result = {
+    "status": "PASS",
+    "analysis_type": "dataset_summary",
+    "row_count": int(df.shape[0]),
+    "column_count": int(df.shape[1]),
+    "columns": df.columns.tolist(),
+    "column_types": {
+        str(column): str(dtype)
+        for column, dtype in df.dtypes.items()
+    },
+    "missing_cells": int(df.isna().sum().sum()),
+    "duplicate_rows": int(df.duplicated().sum()),
+}
+"""
+        return code
+
+    # ========================================================
+    # SAFE FALLBACK FOR UNIMPLEMENTED REQUESTS
+    # ========================================================
+    code += """
+result = {
+    "status": "UNSUPPORTED",
+    "reason": "No code-generation rule supports this request yet.",
+    "requested_step": """ + repr(step_text) + """,
+    "available_columns": df.columns.tolist(),
+}
+"""
+    return code
+
 # LOCAL TEST
 # ============================================================
 
