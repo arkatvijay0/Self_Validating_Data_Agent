@@ -1100,89 +1100,79 @@ def test_production_mode():
 # ARTIFICIAL FAULT DEMONSTRATION
 # =========================================================
 
-def test_fault_recovery():
+def test_fault_recovery(filepath=None):
+    """Test automatic recovery using a supplied or available dataset."""
 
-    print("\n")
+    from pathlib import Path
 
+    print("\n" + "#" * 70)
+    print("TEST 2: ARTIFICIAL FAULT RECOVERY")
     print("#" * 70)
 
-    print(
-        "TEST 2: ARTIFICIAL FAULT RECOVERY"
-    )
+    if filepath is None:
+        candidates = [
+            Path("outputs/uploads/active_uploaded_dataset.csv"),
+            Path("data/raw/sales.csv"),
+        ]
+        filepath = next(
+            (str(path.resolve()) for path in candidates if path.is_file()),
+            None,
+        )
+    else:
+        filepath = str(Path(filepath).resolve())
 
-    print("#" * 70)
+    if filepath is None or not Path(filepath).is_file():
+        print("TEST 2 RESULT: FAIL - No suitable dataset file was found.")
+        return False
 
-    filepath = (
-        r"C:\Users\Vijay\Desktop"
-        r"\Self_Validating_Data_Agent"
-        r"\data\raw\sales.csv"
-    )
+    dataset_columns = get_dataset_columns(filepath)
+    available_columns = set(dataset_columns)
 
-    dataset_columns = get_dataset_columns(
-        filepath
-    )
+    if {"month", "duration"}.issubset(available_columns):
+        step_text = "Calculate the average duration of calls in August."
+        target_columns = ["duration"]
+    elif {"Region", "Total Profit"}.issubset(available_columns):
+        step_text = (
+            "Group the data by Region and calculate "
+            "the total of Total Profit."
+        )
+        target_columns = ["Region", "Total Profit"]
+    else:
+        print("Dataset:", filepath)
+        print("Available columns:", dataset_columns)
+        print(
+            "TEST 2 RESULT: FAIL - No supported test question "
+            "matches this dataset's columns."
+        )
+        return False
 
-    step_text = (
-        "Group the data by Region and calculate "
-        "the total of Total Profit."
-    )
+    print("Dataset:", filepath)
+    print("Test question:", step_text)
 
     result = execute_self_correcting_step(
-
         step_number=1,
-
         step_text=step_text,
-
         filepath=filepath,
-
         data_profile=None,
-
         dataset_columns=dataset_columns,
-
-        target_columns=[
-            "Region",
-            "Total Profit"
-        ],
-
-        test_fault=True
+        target_columns=target_columns,
+        test_fault=True,
     )
 
+    status = result.get("status")
+    attempts = result.get("total_attempts", 0)
+
+    print("\nFinal status:", status)
+    print("Total attempts:", attempts)
+
+    passed = status == "PASS" and attempts >= 2
     print(
-        "\nFinal status:"
+        "\nTEST 2 RESULT:",
+        "PASS" if passed else "FAIL",
     )
-
-    print(
-        result["status"]
-    )
-
-    print(
-        "\nTotal attempts:"
-    )
-
-    print(
-        result["total_attempts"]
-    )
-
-    if (
-        result["status"] == "PASS"
-        and
-        result["total_attempts"] >= 2
-    ):
-
-        print(
-            "\nTEST 2 RESULT: PASS"
-        )
-
-        return True
-
-    print(
-        "\nTEST 2 RESULT: FAIL"
-    )
-
-    return False
+    return passed
 
 
-# =========================================================
 # MAIN TEST RUNNER
 # =========================================================
 

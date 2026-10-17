@@ -97,6 +97,15 @@ question = st.text_input(
     placeholder="e.g., Which campaign had the highest conversion rate?",
 )
 
+test_fault = st.checkbox(
+    "Enable fault-recovery test mode (development only)",
+    value=False,
+    help=(
+        "Injects an intentional error to test automatic recovery. "
+        "Leave disabled for normal analysis."
+    ),
+)
+
 # General calendar fact questions do not require dataset execution. Handle the
 # common May-duration wording without presenting it as a dataset-derived result.
 def answer_calendar_question(text: str) -> str | None:
@@ -170,7 +179,7 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
         st.stop()
 
     quick_answer = answer_simple_data_quality_question(question, preview_df)
-    if quick_answer:
+    if quick_answer and not test_fault:
         st.subheader("Quick dataset check")
         st.info(quick_answer)
         st.caption(
@@ -204,6 +213,7 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
                 pipeline.main(
                     dataset_path=str(dataset_path),
                     user_question=question,
+                    test_fault=test_fault,
                 )
 
         # Capture output without displaying a green completion banner.

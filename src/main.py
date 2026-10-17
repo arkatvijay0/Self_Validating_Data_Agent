@@ -1321,7 +1321,7 @@ def generate_pipeline_recommendation(
 # MAIN
 # =========================================================
 
-def main(dataset_path=None, user_question=None):
+def main(dataset_path=None, user_question=None, test_fault=False):
 
     # Use the dataset supplied by Streamlit when present; retain the default
     # sales dataset for standalone command-line runs.
@@ -1475,7 +1475,7 @@ def main(dataset_path=None, user_question=None):
         data_profile=data_profile,
         dataset_columns=dataset_columns,
         target_columns=target_columns,
-        test_fault=False
+        test_fault=bool(test_fault)
     )
 
     execution_results = execute_plan_steps(
