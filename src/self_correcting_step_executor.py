@@ -134,39 +134,40 @@ def generate_step_code(
 # TEST FAULT INJECTION
 # =========================================================
 
+
 def inject_test_fault(code):
     """
-    Inject an artificial error for testing ONLY.
+    Inject a deliberate execution error for testing only.
 
-    This function is NOT used in the normal production
-    workflow.
-
-    Example:
-
-        Total Profit
-             ↓
-        Wrong Profit
-
-    This allows us to demonstrate that the
-    self-correction mechanism can recover from
-    a generated-code error.
+    The generated code is changed so its first execution fails.
+    This function is used only when test_fault=True.
     """
-
     if not code:
-
         return code
 
-    if "Total Profit" in code:
-
-        faulty_code = code.replace(
-            "Total Profit",
-            "Wrong Profit",
-            1
+    # Prefer corrupting a dataset column reference when one exists.
+    if 'df["' in code:
+        return code.replace(
+            'df["',
+            'df["__TEST_INVALID_COLUMN__',
+            1,
         )
 
-        return faulty_code
+    if "df['" in code:
+        return code.replace(
+            "df['",
+            "df['__TEST_INVALID_COLUMN__",
+            1,
+        )
 
-    return code
+    # For generic operations such as row counts, append an
+    # intentional NameError after the generated result.
+    return (
+        code
+        + "\n# Test-only deliberate execution failure\n"
+        + "__self_correction_test_fault__()\n"
+    )
+
 
 
 # =========================================================
