@@ -204,6 +204,255 @@ def validate_result(result_value):
     }
 
 
+
+# ============================================================
+# 3A. RULE-BASED RESULT VALIDATION (ALGORITHM 1)
+# ============================================================
+
+def validate_result_rules(
+    result_value,
+    count_value=None,
+    total_value=None,
+    percentage_value=None,
+    tolerance=0.5,
+):
+    """
+    Apply deterministic business/data rules to a result.
+
+    The function is deliberately separate from validate_result()
+    so existing callers remain backward-compatible.
+
+    Parameters
+    ----------
+    result_value:
+        Result produced by the analysis. A dictionary, pandas
+        Series, or one-row DataFrame may include fields such as
+        converted_count, total_count, conversion_rate_percent.
+    count_value:
+        Optional explicit numerator/count (e.g. conversions).
+    total_value:
+        Optional explicit denominator/total (e.g. customers).
+    percentage_value:
+        Optional reported percentage to check against count_value
+        and total_value.
+    tolerance:
+        Maximum allowed absolute difference between reported and
+        calculated percentage, in percentage points.
+
+    Returns
+    -------
+    dict with "pass", "reason", and a list of checks.
+    """
+
+    checks = []
+
+    def fail(reason, check_name):
+        checks.append({
+            "name": check_name,
+            "pass": False,
+            "reason": reason,
+        })
+
+    def passed(check_name, details=None):
+        item = {
+            "name": check_name,
+            "pass": True,
+            "reason": None,
+        }
+        if details is not None:
+            item["details"] = details
+        checks.append(item)
+
+    def finite_number(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not np.isfinite(number):
+            return None
+        return number
+
+    # Convert simple pandas outputs to a mapping when possible.
+    values = {}
+    if isinstance(result_value, dict):
+        values = result_value
+    elif isinstance(result_value, pd.Series):
+        values = result_value.to_dict()
+    elif isinstance(result_value, pd.DataFrame):
+        if len(result_value) == 1:
+            values = result_value.iloc[0].to_dict()
+
+    # Normalize field names for alias matching.
+    normalized = {
+        "".join(character.lower() for character in str(key)
+                if character.isalnum()): value
+        for key, value in values.items()
+    }
+
+    def find_alias(aliases):
+        for alias in aliases:
+            key = "".join(
+                character.lower() for character in alias
+                if character.isalnum()
+            )
+            if key in normalized:
+                return normalized[key]
+        return None
+
+    if result_value is None:
+        fail("Result is None.", "result_presence")
+    else:
+        passed("result_presence")
+
+    # Infer count and percentage values only when the result has
+    # recognizable, unambiguous field names.
+    if count_value is None:
+        count_value = find_alias((
+            "converted_count", "conversion_count", "conversions",
+            "converted", "success_count", "numerator",
+        ))
+
+    if total_value is None:
+        total_value = find_alias((
+            "total_count", "customer_count", "total_customers",
+            "total", "sample_size", "denominator",
+        ))
+
+    if percentage_value is None:
+        percentage_value = find_alias((
+            "conversion_rate_percent", "conversion_percentage",
+            "conversion_percent", "percentage", "percent",
+            "rate_percent", "success_rate_percent",
+        ))
+
+    # Check explicitly named percentage fields, plus an explicit
+    # percentage_value argument. Avoid interpreting arbitrary
+    # fields named simply "rate" as percentages.
+    percentage_fields = []
+    for key, value in values.items():
+        key_normalized = "".join(
+            character.lower() for character in str(key)
+            if character.isalnum()
+        )
+        if (
+            "percent" in key_normalized
+            or "percentage" in key_normalized
+        ):
+            percentage_fields.append((str(key), value))
+
+    if percentage_value is not None and not any(
+        value is percentage_value for _, value in percentage_fields
+    ):
+        percentage_fields.append(("percentage_value", percentage_value))
+
+    for field_name, raw_percentage in percentage_fields:
+        percentage = finite_number(raw_percentage)
+        if percentage is None:
+            fail(
+                f"{field_name} must be a finite numeric value.",
+                f"percentage:{field_name}",
+            )
+        elif not 0 <= percentage <= 100:
+            fail(
+                f"{field_name} must be between 0 and 100; "
+                f"received {percentage}.",
+                f"percentage:{field_name}",
+            )
+        else:
+            passed(
+                f"percentage:{field_name}",
+                {"value": percentage, "valid_range": [0, 100]},
+            )
+
+    # Validate counts and their relationship.
+    count = finite_number(count_value) if count_value is not None else None
+    total = finite_number(total_value) if total_value is not None else None
+
+    if count_value is not None:
+        if count is None:
+            fail("Count must be a finite numeric value.", "count_validity")
+        elif count < 0:
+            fail("Count cannot be negative.", "count_validity")
+        elif not count.is_integer():
+            fail("Count must be a whole number.", "count_validity")
+        else:
+            passed("count_validity", {"count": int(count)})
+
+    if total_value is not None:
+        if total is None:
+            fail("Total must be a finite numeric value.", "total_validity")
+        elif total <= 0:
+            fail("Total must be greater than zero.", "total_validity")
+        elif not total.is_integer():
+            fail("Total must be a whole number.", "total_validity")
+        else:
+            passed("total_validity", {"total": int(total)})
+
+    if count is not None and total is not None:
+        if count < 0 or total <= 0:
+            # More specific failures have already been recorded.
+            pass
+        elif count > total:
+            fail(
+                f"Count ({count:g}) cannot exceed total ({total:g}).",
+                "count_total_consistency",
+            )
+        else:
+            passed(
+                "count_total_consistency",
+                {"count": count, "total": total},
+            )
+
+        if count >= 0 and total > 0:
+            calculated_percentage = (count / total) * 100
+            passed(
+                "calculated_percentage",
+                {"calculated_percentage": calculated_percentage},
+            )
+
+            if percentage_value is not None:
+                reported_percentage = finite_number(percentage_value)
+                if reported_percentage is None:
+                    fail(
+                        "Reported percentage must be finite and numeric.",
+                        "reported_percentage_consistency",
+                    )
+                elif abs(
+                    reported_percentage - calculated_percentage
+                ) > tolerance:
+                    fail(
+                        "Reported percentage "
+                        f"({reported_percentage:.4f}%) does not match "
+                        f"the calculated percentage "
+                        f"({calculated_percentage:.4f}%) within "
+                        f"{tolerance} percentage points.",
+                        "reported_percentage_consistency",
+                    )
+                else:
+                    passed(
+                        "reported_percentage_consistency",
+                        {
+                            "reported_percentage": reported_percentage,
+                            "calculated_percentage": calculated_percentage,
+                            "tolerance_percentage_points": tolerance,
+                        },
+                    )
+
+    overall_pass = all(item["pass"] for item in checks)
+
+    failures = [
+        item["reason"] for item in checks if not item["pass"]
+    ]
+
+    return {
+        "pass": overall_pass,
+        "reason": "; ".join(failures) if failures else None,
+        "checks": checks,
+    }
+
+
 # ============================================================
 # 4. NORMALITY CHECK
 # ============================================================
@@ -554,6 +803,45 @@ result = {
             data_series=sample_series,
         )
     )
+
+
+    # Test 8: valid rule-based count and percentage
+    print("\nTEST 8 - Rule-based validation: valid conversion rate")
+    valid_rule_result = validate_result_rules({
+        "converted_count": 135,
+        "total_count": 829,
+        "conversion_rate_percent": (135 / 829) * 100,
+    })
+    print(valid_rule_result)
+    assert valid_rule_result["pass"] is True
+
+    # Test 9: reject a reported percentage that is inconsistent.
+    print("\nTEST 9 - Rule-based validation: incorrect conversion rate")
+    invalid_rule_result = validate_result_rules({
+        "converted_count": 135,
+        "total_count": 829,
+        "conversion_rate_percent": 19.0,
+    })
+    print(invalid_rule_result)
+    assert invalid_rule_result["pass"] is False
+
+    # Test 10: reject counts greater than the total.
+    print("\nTEST 10 - Rule-based validation: count exceeds total")
+    invalid_count_result = validate_result_rules({
+        "converted_count": 135,
+        "total_count": 100,
+        "conversion_rate_percent": 135.0,
+    })
+    print(invalid_count_result)
+    assert invalid_count_result["pass"] is False
+
+    # Test 11: reject a percentage outside the valid range.
+    print("\nTEST 11 - Rule-based validation: percentage out of range")
+    invalid_percentage_result = validate_result_rules({
+        "conversion_rate_percent": 125.0,
+    })
+    print(invalid_percentage_result)
+    assert invalid_percentage_result["pass"] is False
 
     print("\n" + "=" * 70)
     print("VALIDATORS TEST COMPLETED")

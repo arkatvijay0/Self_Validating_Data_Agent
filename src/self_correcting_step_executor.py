@@ -229,7 +229,7 @@ def execute_generated_code(
             "status": "FAIL",
             "success": False,
             "stdout": "",
-            "stderr": str(error),
+            "stderr": f"{type(error).__name__}: {error}",
             "result": None
         }
 
@@ -780,6 +780,16 @@ def execute_self_correcting_step(
         feedback = collect_validation_feedback(
             validation_result
         )
+
+        # Preserve execution errors for feedback-based correction.
+        if not execution_result.get("success", False):
+            feedback["execution_error"] = {
+                "pass": False,
+                "reason": execution_result.get(
+                    "stderr",
+                    "Execution failed without an error message."
+                )
+            }
 
         print(
             "\nValidation feedback:"
