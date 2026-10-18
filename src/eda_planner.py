@@ -433,6 +433,7 @@ def generate_plan_mock(task_type, data_profile, user_query):
                 f"Calculate the mean, median, and standard deviation of '{value_column}'.",
                 f"Identify potential outliers in '{value_column}' using the IQR method.",
                 f"Calculate z-scores for '{value_column}' and identify extreme observations.",
+                "Detect multivariate anomalies using Isolation Forest across suitable numeric features.",
                 f"Compare anomalies detected using the IQR and z-score methods.",
                 f"Summarize the observations identified as potential anomalies in '{value_column}'."
             ]
@@ -443,6 +444,7 @@ def generate_plan_mock(task_type, data_profile, user_query):
                 "Identify suitable numeric variables for anomaly detection.",
                 "Calculate descriptive statistics.",
                 "Use the IQR method to identify potential outliers.",
+                "Detect multivariate anomalies using Isolation Forest across suitable numeric features.",
                 "Use z-scores to identify extreme observations.",
                 "Compare and summarize the detected anomalies."
             ]

@@ -52,6 +52,7 @@ import pandas as pd
 from code_generator import generate_code_mock
 from validators import self_validate
 from code_corrector import correct_generated_code
+from anomaly_detector import detect_anomalies
 
 
 # =========================================================
@@ -504,6 +505,159 @@ def execute_self_correcting_step(
     if target_columns is None:
 
         target_columns = []
+
+    # =====================================================
+    # DEDICATED ISOLATION FOREST EXECUTION
+    # =====================================================
+    # Only the explicit planner step is routed here. Existing IQR,
+    # z-score, and ordinary EDA steps continue through the original
+    # code-generation and self-correction loop below.
+    normalized_step = str(step_text).strip().lower()
+    if (
+        "isolation forest" in normalized_step
+        and "detect multivariate anomalies" in normalized_step
+    ):
+        attempt_history = []
+        current_code = "Dedicated Isolation Forest execution via detect_anomalies()"
+
+        try:
+            source_df = load_dataset(filepath)
+
+            # Use numeric features, excluding columns explicitly profiled as identifiers.
+            feature_columns = source_df.select_dtypes(include=["number"]).columns.tolist()
+            profile_columns = (data_profile or {}).get("columns", {})
+            feature_columns = [
+                column for column in feature_columns
+                if profile_columns.get(column, {}).get("role") != "identifier"
+            ]
+
+            detector_output = detect_anomalies(
+                source_df,
+                feature_columns=feature_columns,
+                contamination=0.05,
+                random_state=42,
+                n_estimators=200,
+            )
+
+            if not isinstance(detector_output, dict):
+                raise ValueError("Isolation Forest returned a non-dictionary result.")
+            if detector_output.get("status") != "PASS":
+                raise ValueError(
+                    str(detector_output.get("reason", "Isolation Forest reported failure."))
+                )
+
+            results_df = detector_output.get("results")
+            anomalies_df = detector_output.get("anomalies")
+            summary = detector_output.get("summary")
+            if not isinstance(results_df, pd.DataFrame):
+                raise ValueError("Isolation Forest results must be a pandas DataFrame.")
+            if not isinstance(anomalies_df, pd.DataFrame):
+                raise ValueError("Isolation Forest anomalies must be a pandas DataFrame.")
+            if not isinstance(summary, dict):
+                raise ValueError("Isolation Forest summary must be a dictionary.")
+            if len(results_df) != len(source_df):
+                raise ValueError(
+                    f"Row-count mismatch: source={len(source_df)}, results={len(results_df)}."
+                )
+            required_columns = {"anomaly_label", "anomaly_score"}
+            if not required_columns.issubset(results_df.columns):
+                raise ValueError("Results are missing anomaly_label or anomaly_score.")
+            if not results_df["anomaly_label"].isin(["anomaly", "normal"]).all():
+                raise ValueError("Anomaly labels contain unsupported values.")
+            scores = pd.to_numeric(results_df["anomaly_score"], errors="coerce")
+            if scores.isna().any() or not scores.map(lambda value: __import__("math").isfinite(float(value))).all():
+                raise ValueError("Anomaly scores contain missing or non-finite values.")
+            expected_anomalies = int((results_df["anomaly_label"] == "anomaly").sum())
+            if len(anomalies_df) != expected_anomalies:
+                raise ValueError(
+                    f"Anomaly-count mismatch: labels={expected_anomalies}, "
+                    f"anomalies table={len(anomalies_df)}."
+                )
+
+            validation_result = {
+                "overall": "PASS",
+                "checks": {
+                    "detector_status": {"pass": True, "reason": "Detector reported PASS."},
+                    "row_count": {
+                        "pass": True,
+                        "source_rows": int(len(source_df)),
+                        "result_rows": int(len(results_df)),
+                    },
+                    "labels": {
+                        "pass": True,
+                        "allowed_values": ["anomaly", "normal"],
+                    },
+                    "scores": {"pass": True, "finite_score_count": int(scores.notna().sum())},
+                    "anomaly_count": {
+                        "pass": True,
+                        "label_count": expected_anomalies,
+                        "anomaly_table_count": int(len(anomalies_df)),
+                    },
+                    "feature_columns": {"pass": bool(feature_columns), "columns": feature_columns},
+                },
+            }
+            execution_result = {
+                "status": "SUCCESS",
+                "success": True,
+                "stdout": "Isolation Forest completed and output checks passed.",
+                "stderr": "",
+                "result": detector_output,
+            }
+            attempt_record = {
+                "attempt": 1,
+                "code": current_code,
+                "execution": execution_result,
+                "validation": validation_result,
+                "feedback": None,
+                "correction": None,
+            }
+            attempt_history.append(attempt_record)
+            return {
+                "status": "PASS",
+                "step_number": step_number,
+                "step": step_text,
+                "attempts": attempt_history,
+                "total_attempts": 1,
+                "final_code": current_code,
+                "final_execution": execution_result,
+                "final_validation": validation_result,
+                "final_result": detector_output,
+            }
+
+        except Exception as error:
+            error_text = f"{type(error).__name__}: {error}"
+            validation_result = {
+                "overall": "FAIL",
+                "checks": {
+                    "isolation_forest": {"pass": False, "reason": error_text}
+                },
+            }
+            execution_result = {
+                "status": "FAIL",
+                "success": False,
+                "stdout": "",
+                "stderr": error_text,
+                "result": None,
+            }
+            attempt_history.append({
+                "attempt": 1,
+                "code": current_code,
+                "execution": execution_result,
+                "validation": validation_result,
+                "feedback": {"overall": "FAIL", "isolation_forest": error_text},
+                "correction": None,
+            })
+            return {
+                "status": "UNRESOLVED",
+                "step_number": step_number,
+                "step": step_text,
+                "attempts": attempt_history,
+                "total_attempts": 1,
+                "final_code": current_code,
+                "final_execution": execution_result,
+                "final_validation": validation_result,
+                "final_result": None,
+            }
 
     attempt_history = []
 
