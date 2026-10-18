@@ -137,13 +137,12 @@ def generate_plan_mock(task_type, data_profile, user_query):
             f"Filter rows where the 'month' column equals '{month_code}', then calculate the mean of numeric 'duration' values and report the filtered row count and valid duration count."
         ]
 
+
     # ==================================================
-    # Specific mean/average questions (after preserving the August case)
+    # Specific mean/average questions with filter preservation
     # ==================================================
 
     if task_type == "mean_analysis":
-        # Match real column names as whole words. This prevents false matches
-        # such as "age" inside "average" and "y" inside "salary".
         def _whole_phrase_match(text, phrase):
             phrase = str(phrase).strip().replace("_", " ")
             if not phrase:
@@ -152,34 +151,102 @@ def generate_plan_mock(task_type, data_profile, user_query):
             return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
         requested_column = next(
-            (col for col in sorted(columns, key=lambda value: len(str(value)), reverse=True)
-             if _whole_phrase_match(query, str(col))),
+            (
+                col for col in sorted(
+                    columns, key=lambda value: len(str(value)), reverse=True
+                )
+                if _whole_phrase_match(query, str(col))
+            ),
             None,
         )
 
-        # Dataset-aware aliases: use them only if their destination exists.
         if requested_column is None:
             mean_aliases = {
-                "revenue": "Total Revenue", "sales": "Total Revenue",
-                "profit": "Total Profit", "cost": "Total Cost",
-                "units": "Units Sold", "quantity": "Units Sold",
+                "revenue": "Total Revenue",
+                "sales": "Total Revenue",
+                "profit": "Total Profit",
+                "cost": "Total Cost",
+                "units": "Units Sold",
+                "quantity": "Units Sold",
+                "account balance": "balance",
+                "call duration": "duration",
             }
-            for alias, destination in sorted(mean_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+            for alias, destination in sorted(
+                mean_aliases.items(), key=lambda item: len(item[0]), reverse=True
+            ):
                 if destination in columns and _whole_phrase_match(query, alias):
                     requested_column = destination
                     break
 
         if requested_column is None:
-            # Explicitly tell the execution layer not to substitute another
-            # available column for the metric the user requested.
             return [
-                "STOP: The user requested a mean/average for a metric that is not present as a dataset column. Do not calculate a different metric. Return an unsupported-metric response naming the requested metric and listing available columns."
+                "STOP: The requested mean/average metric could not be matched to a dataset column. Do not substitute another metric. Return an unsupported-metric response and list available columns."
             ]
 
+        # Preserve supported filters explicitly mentioned by the user.
+        filter_instructions = []
+
+        month_names = {
+            "january": "jan",
+            "february": "feb",
+            "march": "mar",
+            "april": "apr",
+            "may": "may",
+            "june": "jun",
+            "july": "jul",
+            "august": "aug",
+            "september": "sep",
+            "october": "oct",
+            "november": "nov",
+            "december": "dec",
+        }
+
+        selected_month = next(
+            (
+                name for name in month_names
+                if _whole_phrase_match(query, name)
+            ),
+            None,
+        )
+
+        if selected_month and "month" in columns:
+            filter_instructions.append(
+                f"filter the source rows where 'month' equals "
+                f"'{month_names[selected_month]}' (also accept the full month name)"
+            )
+
+        if "marital" in columns:
+            marital_value = next(
+                (
+                    value for value in ("single", "married", "divorced")
+                    if _whole_phrase_match(query, value)
+                ),
+                None,
+            )
+            if marital_value:
+                filter_instructions.append(
+                    f"filter the source rows where 'marital' equals "
+                    f"'{marital_value}'"
+                )
+
+        filter_text = (
+            "First, " + " and ".join(filter_instructions) + ". Then, "
+            if filter_instructions
+            else ""
+        )
+
         return [
-            f"Calculate the arithmetic mean of the numeric values in '{requested_column}' using the dataset, excluding missing values; report the metric name, mean, valid-value count, and dataset row count.",
-            f"Validate the reported mean for '{requested_column}' against the direct numeric mean computed from the source dataset."
+            f"{filter_text}calculate the arithmetic mean of numeric values in "
+            f"'{requested_column}', excluding missing values. Report the metric "
+            f"name, mean, filtered row count, and valid numeric observation count. "
+            f"Do not calculate the mean on unfiltered rows when filters were requested.",
+            f"Independently validate the mean of '{requested_column}' against the "
+            f"source dataset after applying exactly the same requested filters. "
+            f"Confirm the filtered row count and valid numeric observation count."
         ]
+
+    # ==================================================
+
 
     # ==================================================
     # Find relevant columns from the user's question

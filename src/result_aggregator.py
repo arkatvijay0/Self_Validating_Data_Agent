@@ -325,19 +325,32 @@ def select_primary_result(
 
     if analysis_type == "outlier_analysis":
 
+        # Prefer Isolation Forest when a successful step identifies it.
         for step in reversed(successful_steps):
+            step_text = str(step.get("step", "")).lower()
+            result = get_step_result(step)
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
+            result_method = (
+                str(result.get("method", "")).lower()
+                if isinstance(result, dict)
+                else ""
+            )
+
+            if (
+                "isolation forest" in step_text
+                or "isolationforest" in step_text
+                or "isolation forest" in result_method
+                or "isolationforest" in result_method
+            ):
+                return step
+
+        # Preserve existing behavior for other outlier requests.
+        for step in reversed(successful_steps):
+            step_text = str(step.get("step", "")).lower()
 
             if any(
                 keyword in step_text
-                for keyword in [
-                    "outlier",
-                    "unusual",
-                    "anomal"
-                ]
+                for keyword in ["outlier", "unusual", "anomal"]
             ):
                 return step
 

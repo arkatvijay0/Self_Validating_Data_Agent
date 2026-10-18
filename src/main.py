@@ -220,14 +220,21 @@ def safe_json_value(value):
 # JSON PRINT HELPER
 # =========================================================
 
-def print_json(value):
-
-    print(
-        json.dumps(
-            safe_json_value(value),
-            indent=4
-        )
+def print_json(value, max_chars=12000):
+    """Print useful JSON diagnostics without flooding the console with row-level data."""
+    rendered = json.dumps(
+        safe_json_value(value),
+        indent=2,
+        ensure_ascii=False,
+        default=str,
     )
+    if len(rendered) > max_chars:
+        rendered = (
+            rendered[:max_chars]
+            + f"\\n... output shortened ({len(rendered):,} characters total). "
+              "Full results remain available in the saved report/results."
+        )
+    print(rendered)
 
 
 # =========================================================
@@ -1942,23 +1949,16 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         report_path
     )
 
+    print("\\nFinal Report:")
     print(
-        "\nFinal Report:"
+        "Report saved successfully. "
+        f"Report size: {len(str(final_report)):,} characters. "
+        "The Streamlit interface displays a concise answer; use the report "
+        "download for the complete detailed report."
     )
 
-    try:
-        print(final_report)
-    except UnicodeEncodeError:
-        # Keep the saved report intact even if the Windows console encoding
-        # cannot display a Unicode character.
-        safe_report = str(final_report).encode(
-            sys.stdout.encoding or "utf-8",
-            errors="replace"
-        ).decode(sys.stdout.encoding or "utf-8", errors="replace")
-        print(safe_report)
-
     print(
-        "\nReport saved to:"
+        "\\nReport saved to:"
     )
 
     print(

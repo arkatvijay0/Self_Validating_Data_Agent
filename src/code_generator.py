@@ -1182,61 +1182,68 @@ result = {
 '''
             return code
 
-        # Generate safe numeric mean calculation.
+
+        # Generate a numeric mean after applying requested filters.
         code += f'''
 requested_column = {actual_column!r}
+request_text = {step_text.lower()!r}
+filtered_df = df.copy()
 
-values = pd.to_numeric(
-    df[requested_column],
-    errors="coerce"
-)
+# Apply marital-status filters when explicitly requested.
+if "single" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "single"
+    ]
+elif "married" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "married"
+    ]
+elif "divorced" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "divorced"
+    ]
 
-valid_values = values.dropna()
-
-result = {{
-    "status": "PASS" if not valid_values.empty else "FAIL",
-    "analysis_type": "mean_analysis",
-    "metric_column": requested_column,
-    "mean": (
-        float(valid_values.mean())
-        if not valid_values.empty
-        else None
-    ),
-    "valid_value_count": int(valid_values.count()),
-    "dataset_row_count": int(len(df)),
+# Apply a month filter when a month is explicitly requested.
+month_aliases = {{
+    "january": "jan", "february": "feb", "march": "mar",
+    "april": "apr", "may": "may", "june": "jun",
+    "july": "jul", "august": "aug", "september": "sep",
+    "october": "oct", "november": "nov", "december": "dec"
 }}
+requested_month = None
+for month_name, month_abbr in month_aliases.items():
+    if month_name in request_text:
+        requested_month = month_abbr
+        break
+
+if requested_month and "month" in filtered_df.columns:
+    month_values = filtered_df["month"].astype("string").str.strip().str.lower()
+    filtered_df = filtered_df[
+        month_values.isin([requested_month, requested_month + "ust"])
+    ]
+
+if requested_column not in filtered_df.columns:
+    result = {{
+        "status": "FAIL",
+        "analysis_type": "mean_analysis",
+        "reason": "Requested metric column was not found.",
+        "metric_column": requested_column
+    }}
+else:
+    values = pd.to_numeric(filtered_df[requested_column], errors="coerce")
+    valid_values = values.dropna()
+
+    result = {{
+        "status": "PASS" if not valid_values.empty else "FAIL",
+        "analysis_type": "mean_analysis",
+        "metric_column": requested_column,
+        "mean": float(valid_values.mean()) if not valid_values.empty else None,
+        "valid_value_count": int(valid_values.count()),
+        "dataset_row_count": int(len(df)),
+        "filtered_row_count": int(len(filtered_df))
+    }}
 '''
 
-        return code
-
-# ============================================================
-# ========================================================
-    # GENERAL ROW COUNT
-    # ========================================================
-    if any(
-        phrase in step_lower
-        for phrase in (
-            "count the records",
-            "count records",
-            "number of records",
-            "number of rows",
-            "count the rows",
-            "count rows",
-            "how many rows",
-            "how many records",
-            "row count",
-            "record count",
-        )
-    ):
-        code += """
-result = {
-    "status": "PASS",
-    "analysis_type": "row_count",
-    "row_count": int(len(df)),
-    "dataset_row_count": int(len(df)),
-}
-"""
-        return code
 
     # ========================================================
     # GENERAL DATASET SUMMARY
@@ -1263,6 +1270,161 @@ result = {
     "missing_cells": int(df.isna().sum().sum()),
     "duplicate_rows": int(df.duplicated().sum()),
 }
+"""
+        return code
+
+    # ========================================================
+    # ISOLATION FOREST ANOMALY DETECTION
+    # ========================================================
+    if (
+        "isolation forest" in step_lower
+        or (
+            any(word in step_lower for word in ("detect", "identify", "find"))
+            and any(word in step_lower for word in ("anomal", "outlier"))
+            and any(word in step_lower for word in ("multivariate", "across numeric", "numeric features"))
+        )
+    ):
+        code += """
+from sklearn.ensemble import IsolationForest
+from sklearn.impute import SimpleImputer
+
+numeric_df = df.select_dtypes(include=["number"]).copy()
+numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan)
+usable_columns = [
+    column for column in numeric_df.columns
+    if numeric_df[column].notna().any()
+    and numeric_df[column].nunique(dropna=True) > 1
+]
+
+if len(df) < 3:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "reason": "At least three rows are required for anomaly detection.",
+        "row_count": int(len(df)),
+    }
+elif not usable_columns:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "reason": "No suitable numeric features were found.",
+        "available_columns": df.columns.tolist(),
+    }
+else:
+    feature_frame = numeric_df[usable_columns]
+    imputer = SimpleImputer(strategy="median")
+    feature_values = imputer.fit_transform(feature_frame)
+    contamination_value = 0.05
+    model = IsolationForest(
+        n_estimators=200,
+        contamination=contamination_value,
+        random_state=42,
+    )
+    predicted_labels = model.fit_predict(feature_values)
+    anomaly_scores = model.decision_function(feature_values)
+    anomaly_mask = predicted_labels == -1
+    anomaly_rows = df.loc[anomaly_mask].copy()
+    anomaly_rows["anomaly_label"] = "anomaly"
+    anomaly_rows["anomaly_score"] = anomaly_scores[anomaly_mask]
+    anomaly_rows = anomaly_rows.sort_values(
+        "anomaly_score", ascending=True
+    )
+    anomaly_count = int(anomaly_mask.sum())
+    sample_limit = 10
+    anomaly_sample = anomaly_rows.head(sample_limit).copy()
+    result = {
+        "status": "PASS",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "feature_columns": usable_columns,
+        "row_count": int(len(df)),
+        "anomaly_count": anomaly_count,
+        "normal_count": int(len(df) - anomaly_count),
+        "anomaly_percentage": round(float(anomaly_mask.mean() * 100), 2),
+        "contamination": contamination_value,
+        "sample_limit": sample_limit,
+        "sample_anomalies": anomaly_sample,
+        "sample_note": (
+            f"Showing {len(anomaly_sample)} of {anomaly_count} detected anomalies."
+        ),
+    }
+"""
+        return code
+
+    # ========================================================
+    # SUMMARY OF ANOMALOUS OBSERVATIONS IN A NAMED COLUMN
+    # ========================================================
+    if (
+        any(word in step_lower for word in ("summarize", "summarise", "summary"))
+        and any(word in step_lower for word in ("anomal", "outlier", "unusual"))
+    ):
+        # Extract a quoted column name without shadowing the existing local `re` import.
+        quoted_column_match = __import__("re").search(
+            r"""(?:in|for|from)\s+['"]([^'"]+)['"]""",
+            str(step_text),
+            __import__("re").IGNORECASE,
+        )
+        requested_column = (
+            quoted_column_match.group(1).strip()
+            if quoted_column_match
+            else None
+        )
+        code += f"""
+requested_column = {requested_column!r}
+if requested_column is None:
+    lowered_step = {step_lower!r}
+    candidates = sorted(df.columns, key=lambda item: len(str(item)), reverse=True)
+    requested_column = next(
+        (column for column in candidates if str(column).lower() in lowered_step),
+        None,
+    )
+
+if requested_column not in df.columns:
+    result = {{
+        "status": "UNSUPPORTED",
+        "analysis_type": "anomaly_summary",
+        "reason": "Could not identify the requested anomaly column.",
+        "requested_column": requested_column,
+        "available_columns": df.columns.tolist(),
+    }}
+else:
+    values = pd.to_numeric(df[requested_column], errors="coerce")
+    valid_values = values.replace([np.inf, -np.inf], np.nan).dropna()
+    if valid_values.empty:
+        result = {{
+            "status": "FAIL",
+            "analysis_type": "anomaly_summary",
+            "column": requested_column,
+            "reason": "The requested column contains no valid numeric values.",
+        }}
+    else:
+        q1 = float(valid_values.quantile(0.25))
+        q3 = float(valid_values.quantile(0.75))
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        anomaly_mask = values.notna() & (
+            (values < lower_bound) | (values > upper_bound)
+        )
+        anomaly_rows = df.loc[anomaly_mask].copy()
+        anomaly_rows["anomaly_value"] = values.loc[anomaly_mask]
+        anomaly_rows["anomaly_reason"] = "Outside 1.5*IQR bounds"
+        result = {{
+            "status": "PASS",
+            "analysis_type": "anomaly_summary",
+            "method": "IQR",
+            "column": requested_column,
+            "row_count": int(len(df)),
+            "valid_value_count": int(valid_values.count()),
+            "anomaly_count": int(anomaly_mask.sum()),
+            "lower_bound": float(lower_bound),
+            "upper_bound": float(upper_bound),
+            "anomaly_min": float(anomaly_rows["anomaly_value"].min()) if not anomaly_rows.empty else None,
+            "anomaly_max": float(anomaly_rows["anomaly_value"].max()) if not anomaly_rows.empty else None,
+            "anomalies": anomaly_rows,
+        }}
 """
         return code
 

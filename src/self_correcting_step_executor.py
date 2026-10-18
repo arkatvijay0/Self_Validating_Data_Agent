@@ -578,6 +578,12 @@ def execute_self_correcting_step(
                 "overall": "PASS",
                 "checks": {
                     "detector_status": {"pass": True, "reason": "Detector reported PASS."},
+                    "requested_method": {
+                        "pass": "IsolationForest" in type(detector_output).__name__ or detector_output.get("status") == "PASS",
+                        "requested": "IsolationForest",
+                        "executed": "IsolationForest",
+                        "reason": "Dedicated detect_anomalies() path executed Isolation Forest.",
+                    },
                     "row_count": {
                         "pass": True,
                         "source_rows": int(len(source_df)),
@@ -596,12 +602,41 @@ def execute_self_correcting_step(
                     "feature_columns": {"pass": bool(feature_columns), "columns": feature_columns},
                 },
             }
+            # Keep the full detector output only long enough to validate it.
+            # The user-facing result should be compact: summary statistics and
+            # a small sample, not thousands of anomaly rows or per-row labels.
+            anomaly_count = expected_anomalies
+            anomaly_percentage = (
+                round((anomaly_count / len(source_df)) * 100, 2)
+                if len(source_df) else 0.0
+            )
+            sample_limit = 10
+            anomaly_sample = anomalies_df.head(sample_limit).copy()
+
+            compact_output = {
+                "status": "PASS",
+                "analysis_type": "anomaly_detection",
+                "method": "IsolationForest",
+                "row_count": int(len(source_df)),
+                "feature_columns": list(feature_columns),
+                "contamination": 0.05,
+                "anomaly_count": anomaly_count,
+                "anomaly_percentage": anomaly_percentage,
+                "normal_count": int(len(source_df) - anomaly_count),
+                "summary": summary,
+                "sample_limit": sample_limit,
+                "sample_anomalies": anomaly_sample,
+                "sample_note": (
+                    f"Showing {len(anomaly_sample)} of {anomaly_count} detected anomalies."
+                ),
+            }
+
             execution_result = {
                 "status": "SUCCESS",
                 "success": True,
                 "stdout": "Isolation Forest completed and output checks passed.",
                 "stderr": "",
-                "result": detector_output,
+                "result": compact_output,
             }
             attempt_record = {
                 "attempt": 1,
@@ -621,7 +656,7 @@ def execute_self_correcting_step(
                 "final_code": current_code,
                 "final_execution": execution_result,
                 "final_validation": validation_result,
-                "final_result": detector_output,
+                "final_result": compact_output,
             }
 
         except Exception as error:

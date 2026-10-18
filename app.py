@@ -121,6 +121,90 @@ def answer_calendar_question(text: str) -> str | None:
     return None
 
 
+def _extract_section(report_text: str, header_patterns: list[str], max_chars: int = 1800) -> str | None:
+    """Extract a small, relevant section from the full report."""
+    lines = report_text.splitlines()
+    start = None
+    for index, line in enumerate(lines):
+        if any(re.search(pattern, line, re.IGNORECASE) for pattern in header_patterns):
+            start = index
+            break
+    if start is None:
+        return None
+
+    collected = [lines[start].strip()]
+    for line in lines[start + 1:]:
+        stripped = line.strip()
+        if stripped and (
+            re.match(r"^\s*\d+\.\s+[A-Z]", stripped)
+            or re.match(r"^[A-Z][A-Z0-9 /&_-]{4,}$", stripped)
+            or stripped.startswith("====")
+        ):
+            break
+        collected.append(line)
+        if sum(len(item) + 1 for item in collected) >= max_chars:
+            collected.append("... section shortened for display.")
+            break
+
+    text = "\n".join(collected).strip()
+    return text[:max_chars].rstrip() if text else None
+
+
+def build_concise_report(question: str, report_text: str) -> str:
+    """Show only the answer and a few relevant reliability details in the main UI."""
+    q = question.lower()
+    sections = [f"Question: {question}"]
+
+    insight = _extract_section(
+        report_text,
+        [r"^\s*\d*\.?\s*INSIGHT(?: GENERATION)?\s*$", r"^Generated Insight:?$"],
+        max_chars=1600,
+    )
+    recommendation = _extract_section(
+        report_text,
+        [r"^\s*\d*\.?\s*RECOMMENDATION(?: GENERATION)?\s*$", r"^7\.\s+RECOMMENDATION$"],
+        max_chars=900,
+    )
+    reliability = _extract_section(
+        report_text,
+        [r"^\s*\d*\.?\s*OVERALL RELIABILITY\s*$", r"^OVERALL RELIABILITY$"],
+        max_chars=700,
+    )
+
+    if any(term in q for term in ("anomal", "outlier", "isolation forest")):
+        field_patterns = [
+            ("Method", r'"method"\s*:\s*"([^"]+)"'),
+            ("Records analyzed", r'"row_count"\s*:\s*(\d+)'),
+            ("Anomalies detected", r'"anomaly_count"\s*:\s*(\d+)'),
+            ("Anomaly percentage", r'"anomaly_percentage"\s*:\s*([0-9.]+)'),
+            ("Features used", r'"feature_columns"\s*:\s*(\[[^\]]{0,1000}\])'),
+        ]
+        compact_fields = []
+        for label, pattern in field_patterns:
+            found = re.search(pattern, report_text, re.IGNORECASE)
+            if found:
+                compact_fields.append(f"- {label}: {found.group(1)}")
+        if compact_fields:
+            sections.append("Key results\n" + "\n".join(compact_fields))
+
+    if insight:
+        body = "\n".join(insight.splitlines()[1:]).strip()
+        if body:
+            sections.append("Key finding\n" + body)
+    if recommendation:
+        body = "\n".join(recommendation.splitlines()[1:]).strip()
+        if body:
+            sections.append("Recommendation\n" + body)
+    if reliability:
+        body = "\n".join(reliability.splitlines()[1:]).strip()
+        if body:
+            sections.append("Reliability\n" + body)
+
+    if len(sections) == 1:
+        sections.append("Report summary\n" + (report_text[:1800].strip() or "No report text was generated."))
+    return "\n\n".join(sections)
+
+
 def answer_simple_data_quality_question(text: str, frame: pd.DataFrame) -> str | None:
     """Answer basic deterministic dataset checks without running the full EDA pipeline."""
     q = text.lower().strip()
@@ -220,7 +304,7 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
         logs = log_buffer.getvalue()
 
         with st.expander("View pipeline output", expanded=False):
-            st.text(logs[-30000:] if logs else "No console output was captured.")
+            st.text(logs[-8000:] if logs else "No console output was captured.")
 
         if REPORT_PATH.exists():
             report_text = REPORT_PATH.read_text(
@@ -228,8 +312,23 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
                 errors="replace",
             )
 
-            st.subheader("Final analysis report")
-            st.text(report_text)
+            st.subheader("Answer")
+            concise_report = build_concise_report(question, report_text)
+            st.text(concise_report)
+
+            with st.expander("View full report and detailed evidence", expanded=False):
+                st.caption(
+                    "The full report can be large. Open this section only when you need "
+                    "the detailed evidence, per-step results, and validation traceability."
+                )
+                st.text(
+                    report_text[:20000]
+                    + (
+                        "\\n\\n... Full report shortened in the browser to keep the page responsive. "
+                        "Use Download report (.txt) for the complete report."
+                        if len(report_text) > 20000 else ""
+                    )
+                )
 
             st.download_button(
                 "Download report (.txt)",
