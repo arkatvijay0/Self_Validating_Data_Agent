@@ -1,4 +1,3 @@
-
 import math
 import re
 import pandas as pd
@@ -754,6 +753,43 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
             return generate_conversion_insight(dataset_path)
         return "Conversion analysis requires the dataset path to independently verify conversion and y values."
 
+            # Handle validated grouped-mean comparisons before generic mean logic.
+    if (
+        isinstance(result, dict)
+        and result.get("analysis_type") == "grouped_mean_analysis"
+    ):
+        group_results = result.get("group_results", {})
+
+        no_group = group_results.get("no", {})
+        yes_group = group_results.get("yes", {})
+
+        no_mean = safe_float(no_group.get("mean_balance"))
+        yes_mean = safe_float(yes_group.get("mean_balance"))
+        difference = safe_float(
+            result.get("mean_difference_yes_minus_no")
+        )
+
+        if (
+            no_mean is not None
+            and yes_mean is not None
+            and difference is not None
+        ):
+            no_count = int(no_group.get("row_count", 0))
+            yes_count = int(yes_group.get("row_count", 0))
+
+            return (
+                f"The average balance was {no_mean:,.2f} for non-subscribers "
+                f"and {yes_mean:,.2f} for subscribers. "
+                f"The subscriber group average was {difference:,.2f} "
+                f"higher (non-subscribers: {no_count:,}; "
+                f"subscribers: {yes_count:,})."
+            )
+
+        return (
+            "The grouped average balance comparison could not be "
+            "generated because one or more validated group means "
+            "were missing."
+        )
     # Handle specific mean/average questions before the generic dataset summary.
     mean_terms = ("average", "avg", "mean")
     is_mean_question = any(re.search(r"\b" + re.escape(term) + r"\b", question_lower) for term in mean_terms)
@@ -821,8 +857,19 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
                     f"across {filtered_rows:,} rows matching that month."
                 )
 
+            metric_name = str(requested_column).replace("_", " ").strip()
+            metric_label = (
+                f"customer {metric_name}"
+                if metric_name.lower() == "balance"
+                and any(
+                    term in question_lower
+                    for term in ("customer", "customers", "client", "clients")
+                )
+                else metric_name
+            )
+
             return (
-                f"The average {str(requested_column).replace('_', ' ')} is {values.mean():,.2f}, "
+                f"The average {metric_label} is {values.mean():,.2f}, "
                 f"based on {len(values):,} valid numeric observations."
             )
 

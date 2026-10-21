@@ -210,6 +210,21 @@ def select_primary_result(
 
     if analysis_type == "comparison":
 
+
+        # Prefer a valid grouped-mean result over a generic overall mean.
+        for step in reversed(successful_steps):
+            result = get_step_result(step)
+
+            if (
+                isinstance(result, dict)
+                and result.get("analysis_type") == "grouped_mean_analysis"
+                and result.get("status") == "PASS"
+                and isinstance(result.get("group_results"), dict)
+                and len(result["group_results"]) >= 2
+                and result.get("mean_difference_yes_minus_no") is not None
+            ):
+                return step
+
         # Prefer a step explicitly identifying the highest category.
         for step in reversed(successful_steps):
 

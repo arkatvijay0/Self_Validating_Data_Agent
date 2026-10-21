@@ -168,8 +168,44 @@ def analyze_task_mock(user_query, data_profile):
             "notes": "Filtered mean request: filter rows to the named month before calculating the average.",
         }
 
+
+    # Classify grouped mean comparisons before generic mean analysis.
+    # Example: compare average balance for customers who subscribed vs. those who did not.
+    grouped_mean_comparison = (
+        has_mean_intent
+        and any(
+            _contains_term(query, term)
+            for term in ("compare", "comparison", "across", "between")
+        )
+        and any(
+            term in query
+            for term in ("subscrib", "subscription")
+        )
+        and "balance" in profile_columns
+        and ("y" in profile_columns or "conversion" in profile_columns)
+    )
+
+    if grouped_mean_comparison:
+        group_column = (
+            "y" if "y" in profile_columns else "conversion"
+        )
+        return {
+            "task_type": "comparison",
+            "target_columns": ["balance", group_column],
+            "metric_column": "balance",
+            "group_column": group_column,
+            "comparison_metric": "mean",
+            "requested_metric": "balance",
+            "unsupported_metric": False,
+            "notes": (
+                "Compare average customer balance across subscription "
+                "outcomes (yes/no)."
+            ),
+        }
+
     # Classify specific numeric aggregation before generic descriptive summary.
     if has_mean_intent:
+
         metric_phrase = _metric_phrase(query)
         if not query_column_matches and metric_phrase:
             # Only flag the likely metric as unsupported when it does not match a

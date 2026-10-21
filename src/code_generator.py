@@ -1097,6 +1097,94 @@ result = pd.DataFrame({
         return code
 
 
+    # ========================================================
+    # GROUPED MEAN: SUBSCRIBED VS NOT SUBSCRIBED
+    # ========================================================
+
+    grouped_mean_request = (
+        any(word in step_lower.split() for word in ("mean", "average", "avg"))
+        and "balance" in step_lower
+        and any(
+            token in step_lower
+            for token in ("subscrib", "subscription")
+        )
+        and any(
+            token in step_lower
+            for token in ("compare", "comparison", "across", "between", "group", "grouped", "by")
+        )
+    )
+
+    if grouped_mean_request:
+        code += '''
+required_columns = ["balance", "y"]
+missing_columns = [
+    column for column in required_columns
+    if column not in df.columns
+]
+
+if missing_columns:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "reason": "Required columns missing: " + ", ".join(missing_columns),
+    }
+else:
+    working = pd.DataFrame({
+        "subscription_status": (
+            df["y"].astype("string").str.strip().str.lower()
+        ),
+        "balance": pd.to_numeric(df["balance"], errors="coerce"),
+    })
+
+    working = working[
+        working["subscription_status"].isin(["yes", "no"])
+    ].copy()
+
+    grouped = working.groupby("subscription_status").agg(
+        row_count=("subscription_status", "size"),
+        valid_value_count=("balance", "count"),
+        mean_balance=("balance", "mean"),
+    )
+
+    group_results = {
+        str(status): {
+            "row_count": int(row["row_count"]),
+            "valid_value_count": int(row["valid_value_count"]),
+            "mean_balance": (
+                float(row["mean_balance"])
+                if pd.notna(row["mean_balance"])
+                else None
+            ),
+        }
+        for status, row in grouped.iterrows()
+    }
+
+    both_groups_available = (
+        "yes" in group_results
+        and "no" in group_results
+        and group_results["yes"]["mean_balance"] is not None
+        and group_results["no"]["mean_balance"] is not None
+    )
+
+    result = {
+        "status": "PASS" if both_groups_available else "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": "balance",
+        "group_column": "y",
+        "group_results": group_results,
+        "mean_difference_yes_minus_no": (
+            group_results["yes"]["mean_balance"]
+            - group_results["no"]["mean_balance"]
+            if both_groups_available
+            else None
+        ),
+        "dataset_row_count": int(len(df)),
+        "analyzed_row_count": int(len(working)),
+    }
+'''
+        return code
+
+
 
     # ========================================================
     # 12. GENERAL MEAN / AVERAGE
@@ -1243,7 +1331,7 @@ else:
         "filtered_row_count": int(len(filtered_df))
     }}
 '''
-
+        return code
 
     # ========================================================
     # GENERAL DATASET SUMMARY

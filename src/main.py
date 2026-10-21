@@ -83,7 +83,10 @@ from evidence_mapping import (
     create_correlation_evidence,
     create_trend_evidence,
     create_evidence_summary,
-    map_insight_to_evidence
+)
+
+from evidence_mapping_grouped_mean_fixed import (
+    map_insight_to_evidence,
 )
 
 from recommendation_generator import (
@@ -774,7 +777,16 @@ def attach_evidence_traceability(mapped_evidence, evidence):
         return mapped_evidence
 
     analysis_type = str(evidence.get("analysis_type", "unknown"))
-    if analysis_type == "grouped_analysis":
+    if analysis_type == "grouped_mean_analysis":
+        sources.append({
+            "source_id": "primary_result.group_results",
+            "source_type": "validated_grouped_mean_result",
+            "group_column": evidence.get("group_column"),
+            "metric_column": evidence.get("metric_column"),
+            "aggregation": "mean",
+            "result": safe_json_value(evidence.get("supporting_result", evidence.get("result"))),
+        })
+    elif analysis_type == "grouped_analysis":
         sources.append({
             "source_id": "grouped_series",
             "source_type": "grouped_aggregation",
@@ -1008,6 +1020,54 @@ def create_evidence(
         }
 
     # -----------------------------------------------------
+    # GROUPED MEAN COMPARISON
+    # -----------------------------------------------------
+    # Keep group-specific means and counts as the evidence source instead
+    # of routing this result to the legacy Region / Total Profit branch.
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "grouped_mean_analysis"
+    ):
+        group_results = primary_result.get("group_results", {})
+        no_group = group_results.get("no", {}) if isinstance(group_results, dict) else {}
+        yes_group = group_results.get("yes", {}) if isinstance(group_results, dict) else {}
+        difference = primary_result.get("mean_difference_yes_minus_no")
+
+        numeric_types = (int, float, np.integer, np.floating)
+        valid_result = (
+            isinstance(no_group, dict)
+            and isinstance(yes_group, dict)
+            and isinstance(no_group.get("mean_balance"), numeric_types)
+            and isinstance(yes_group.get("mean_balance"), numeric_types)
+            and isinstance(no_group.get("row_count"), (int, np.integer))
+            and isinstance(yes_group.get("row_count"), (int, np.integer))
+            and isinstance(no_group.get("valid_value_count"), (int, np.integer))
+            and isinstance(yes_group.get("valid_value_count"), (int, np.integer))
+            and isinstance(difference, numeric_types)
+        )
+
+        evidence_payload = safe_json_value(primary_result)
+        return {
+            "status": "PASS" if valid_result else "FAIL",
+            "analysis_type": "grouped_mean_analysis",
+            "metric_column": primary_result.get("metric_column", "balance"),
+            "group_column": primary_result.get("group_column", "y"),
+            "group_results": safe_json_value(group_results),
+            "mean_difference_yes_minus_no": (
+                float(difference) if isinstance(difference, numeric_types) else None
+            ),
+            "supporting_result": evidence_payload,
+            "result": evidence_payload,
+            "evidence_summary": json.dumps(
+                evidence_payload, indent=2, ensure_ascii=False
+            ),
+            "reason": None if valid_result else (
+                "Grouped mean result is missing required group statistics."
+            ),
+        }
+
+    # -----------------------------------------------------
     # COMPARISON
     # -----------------------------------------------------
 
@@ -1157,6 +1217,34 @@ def generate_pipeline_insight(
         )
     ).lower()
 
+    # A grouped mean comparison must use the validated group means, not a
+    # generic overall mean or a sales-specific grouped-series fallback.
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "grouped_mean_analysis"
+    ):
+        groups = primary_result.get("group_results", {})
+        no_group = groups.get("no", {}) if isinstance(groups, dict) else {}
+        yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
+        no_mean = no_group.get("mean_balance")
+        yes_mean = yes_group.get("mean_balance")
+        difference = primary_result.get("mean_difference_yes_minus_no")
+        metric = str(primary_result.get("metric_column", "balance"))
+
+        if all(isinstance(value, (int, float, np.integer, np.floating))
+               for value in (no_mean, yes_mean, difference)):
+            return (
+                f"Average customer {metric} was {float(no_mean):,.2f} for non-subscribers "
+                f"and {float(yes_mean):,.2f} for subscribers. "
+                f"The subscriber group average was {float(difference):,.2f} higher "
+                f"(yes minus no). The comparison is descriptive and does not establish causation."
+            )
+        return (
+            f"The grouped average comparison for {metric} could not be summarized "
+            "because one or more required group means were missing."
+        )
+
     # A specific grouped conversion-rate question must not be routed to the
     # generic conversion insight, which reports only the overall dataset rate.
     if (
@@ -1252,6 +1340,30 @@ def generate_pipeline_recommendation(
             f"Consider further analysis of the {top_category} group for {primary_result.get('group_column', 'the requested factor')}, which has the highest observed "
             f"conversion rate at {top_rate:.2f}%{count_detail}. Compare sample sizes and customer characteristics "
             "before allocating resources; this descriptive association does not establish causation."
+        )
+
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "grouped_mean_analysis"
+    ):
+        groups = primary_result.get("group_results", {})
+        no_group = groups.get("no", {}) if isinstance(groups, dict) else {}
+        yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
+        no_mean = no_group.get("mean_balance")
+        yes_mean = yes_group.get("mean_balance")
+        if isinstance(no_mean, (int, float, np.integer, np.floating)) and isinstance(
+            yes_mean, (int, float, np.integer, np.floating)
+        ):
+            return (
+                "Investigate whether the higher average balance among subscribers "
+                "is associated with other customer characteristics, such as job, "
+                "age, or campaign contact history. Compare group sizes and avoid "
+                "treating this descriptive difference as evidence that balance causes subscription."
+            )
+        return (
+            "Validate the group-level balance statistics before using this comparison "
+            "to guide customer targeting."
         )
 
     try:
@@ -1740,8 +1852,11 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         else ""
     )
 
-    if str(result_analysis_type).lower() == "conversion_factor_analysis":
-        analysis_type = "conversion_factor_analysis"
+    if str(result_analysis_type).lower() in (
+        "conversion_factor_analysis",
+        "grouped_mean_analysis",
+    ):
+        analysis_type = str(result_analysis_type).lower()
     else:
         analysis_type = (
             task_analysis.get(
@@ -1787,10 +1902,8 @@ def main(dataset_path=None, user_question=None, test_fault=False):
     validation_result_data = (
         grouped_series
         if (
-            str(analysis_type).lower()
-            == "comparison"
-            and
-            grouped_series is not None
+            str(analysis_type).lower() == "comparison"
+            and grouped_series is not None
         )
         else primary_result
     )

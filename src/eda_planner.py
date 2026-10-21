@@ -137,6 +137,29 @@ def generate_plan_mock(task_type, data_profile, user_query):
             f"Filter rows where the 'month' column equals '{month_code}', then calculate the mean of numeric 'duration' values and report the filtered row count and valid duration count."
         ]
 
+    # GROUPED MEAN: average balance by subscription outcome.
+    grouped_mean_comparison = (
+        task_type == "comparison"
+        and any(term in query.split() for term in ("average", "mean", "avg"))
+        and any(
+            term in query
+            for term in ("compare", "comparison", "across", "between")
+        )
+        and any(term in query for term in ("subscrib", "subscription"))
+        and "balance" in columns
+        and "y" in columns
+    )
+
+    if grouped_mean_comparison:
+        group_column = "y"
+        return [
+            f"Compare the average balance grouped by subscription outcome using '{group_column}' (yes/no). Report the row count, valid numeric count, and mean balance for each group, plus the difference between the yes and no group means.",
+
+f"Independently recompute and validate the average balance grouped by subscription outcome using '{group_column}' (yes/no), reporting each group's row count, valid numeric count, mean balance, and the yes-minus-no difference."
+
+        ]
+
+
 
     # ==================================================
     # Specific mean/average questions with filter preservation
