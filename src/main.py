@@ -1367,6 +1367,74 @@ def generate_pipeline_recommendation(
         == "grouped_mean_analysis"
     ):
         groups = primary_result.get("group_results", {})
+        if not isinstance(groups, dict):
+            groups = {}
+
+        metric = str(
+            primary_result.get("metric_column")
+            or primary_result.get("metric")
+            or "requested metric"
+        ).strip()
+        metric_label = metric.replace("_", " ")
+
+        def extract_mean(group):
+            if not isinstance(group, dict):
+                return None
+
+            for key in ("mean_value", "mean", f"mean_{metric}", "average"):
+                value = group.get(key)
+                if isinstance(
+                    value, (int, float, np.integer, np.floating)
+                ) and np.isfinite(float(value)):
+                    return float(value)
+
+            return None
+
+        no_group = groups.get("no", {})
+        yes_group = groups.get("yes", {})
+
+        no_mean = extract_mean(no_group)
+        yes_mean = extract_mean(yes_group)
+
+        if no_mean is None or yes_mean is None:
+            return (
+                f"The grouped comparison for {metric_label} could not be "
+                "fully verified because one or both group means are missing. "
+                "Review the metric-specific result and evidence before using "
+                "this comparison for customer targeting."
+            )
+
+        difference = yes_mean - no_mean
+
+        if difference > 0:
+            direction = "higher"
+        elif difference < 0:
+            direction = "lower"
+        else:
+            direction = "the same"
+
+        if difference == 0:
+            comparison = (
+                f"both groups have the same average {metric_label} "
+                f"({yes_mean:.2f})"
+            )
+        else:
+            comparison = (
+                f"the subscriber group's average {metric_label} is "
+                f"{direction} by approximately {abs(difference):.2f}"
+            )
+
+        return (
+            f"The non-subscriber group's average {metric_label} is "
+            f"{no_mean:.2f}, and the subscriber group's average is "
+            f"{yes_mean:.2f}; {comparison}. Investigate whether this "
+            "difference is associated with other customer characteristics. "
+            "Check group sizes and data quality before making targeting "
+            "decisions. This descriptive comparison does not establish "
+            "causation."
+        )
+
+        groups = primary_result.get("group_results", {})
         no_group = groups.get("no", {}) if isinstance(groups, dict) else {}
         yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
         no_mean = no_group.get("mean_balance")
