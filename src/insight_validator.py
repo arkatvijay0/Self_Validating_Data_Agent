@@ -1067,7 +1067,7 @@ def validate_question_relevance(
         "cost": r"\b(cost|expense|expenditure)\b",
         "units": r"\b(units?|quantity|volume)\b",
         "orders": r"\b(orders?|order count)\b",
-        "customers": r"\b(customers?|clients?)\b",
+        "customers": r"\b(customers?|clients?|subscribers?|non[- ]subscribers?)\b",
     }
 
     for metric, pattern in metric_groups.items():
