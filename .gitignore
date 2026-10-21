@@ -26,3 +26,18 @@ outputs/*
 
 # Local configuration
 config/
+
+# Local backups and temporary repair artifacts
+*.bak
+*.bak*
+*.backup*
+*.before_*
+*.broken_*
+*_changes.diff
+*_review.diff
+_repair_*.py
+patch_mean_filters.py
+compare_anomaly_features.py
+verify_conversion_analysis.py
+test_isolation_forest_stability.py
+/src/all files.zip

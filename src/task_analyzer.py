@@ -170,35 +170,66 @@ def analyze_task_mock(user_query, data_profile):
 
 
     # Classify grouped mean comparisons before generic mean analysis.
-    # Example: compare average balance for customers who subscribed vs. those who did not.
-    grouped_mean_comparison = (
+    # Preserve the numeric metric explicitly requested by the user.
+    grouped_mean_comparison_intent = (
         has_mean_intent
         and any(
             _contains_term(query, term)
             for term in ("compare", "comparison", "across", "between")
         )
-        and any(
-            term in query
-            for term in ("subscrib", "subscription")
-        )
-        and "balance" in profile_columns
+        and any(term in query for term in ("subscrib", "subscription"))
         and ("y" in profile_columns or "conversion" in profile_columns)
     )
 
-    if grouped_mean_comparison:
-        group_column = (
-            "y" if "y" in profile_columns else "conversion"
+    if grouped_mean_comparison_intent:
+        group_column = "y" if "y" in profile_columns else "conversion"
+        requested_numeric_columns = [
+            column for column in query_column_matches
+            if column in profile_columns
+            and profile_columns.get(column, {}).get("role") == "continuous"
+        ]
+        metric_column = (
+            max(requested_numeric_columns, key=lambda value: len(str(value)))
+            if requested_numeric_columns else None
         )
+        if metric_column is None:
+            metric_phrase = _metric_phrase(query)
+            if metric_phrase:
+                return {
+                    "task_type": "comparison",
+                    "target_columns": [group_column],
+                    "metric_column": None,
+                    "group_column": group_column,
+                    "comparison_metric": "mean",
+                    "requested_metric": metric_phrase,
+                    "unsupported_metric": True,
+                    "notes": (
+                        f"The requested comparison metric '{metric_phrase}' "
+                        "could not be matched to a numeric dataset column. "
+                        "Do not substitute another metric."
+                    ),
+                }
+            # No explicit metric: do not silently default to balance.
+            return {
+                "task_type": "comparison",
+                "target_columns": [group_column],
+                "metric_column": None,
+                "group_column": group_column,
+                "comparison_metric": "mean",
+                "requested_metric": None,
+                "unsupported_metric": True,
+                "notes": "The comparison metric was not specified.",
+            }
         return {
             "task_type": "comparison",
-            "target_columns": ["balance", group_column],
-            "metric_column": "balance",
+            "target_columns": [metric_column, group_column],
+            "metric_column": metric_column,
             "group_column": group_column,
             "comparison_metric": "mean",
-            "requested_metric": "balance",
+            "requested_metric": metric_column,
             "unsupported_metric": False,
             "notes": (
-                "Compare average customer balance across subscription "
+                f"Compare average '{metric_column}' across subscription "
                 "outcomes (yes/no)."
             ),
         }

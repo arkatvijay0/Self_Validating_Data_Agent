@@ -763,32 +763,25 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
         no_group = group_results.get("no", {})
         yes_group = group_results.get("yes", {})
 
-        no_mean = safe_float(no_group.get("mean_balance"))
-        yes_mean = safe_float(yes_group.get("mean_balance"))
-        difference = safe_float(
-            result.get("mean_difference_yes_minus_no")
-        )
+        no_mean = safe_float(no_group.get("mean_value", no_group.get("mean")))
+        yes_mean = safe_float(yes_group.get("mean_value", yes_group.get("mean")))
+        difference = safe_float(result.get("mean_difference_yes_minus_no"))
+        metric = str(result.get("metric_column") or "requested metric")
 
-        if (
-            no_mean is not None
-            and yes_mean is not None
-            and difference is not None
-        ):
+        if no_mean is not None and yes_mean is not None and difference is not None:
             no_count = int(no_group.get("row_count", 0))
             yes_count = int(yes_group.get("row_count", 0))
-
+            direction = "higher" if difference >= 0 else "lower"
             return (
-                f"The average balance was {no_mean:,.2f} for non-subscribers "
+                f"The average {metric} was {no_mean:,.2f} for non-subscribers "
                 f"and {yes_mean:,.2f} for subscribers. "
-                f"The subscriber group average was {difference:,.2f} "
-                f"higher (non-subscribers: {no_count:,}; "
-                f"subscribers: {yes_count:,})."
+                f"The subscriber group average was {abs(difference):,.2f} {direction} "
+                f"(non-subscribers: {no_count:,}; subscribers: {yes_count:,})."
             )
 
         return (
-            "The grouped average balance comparison could not be "
-            "generated because one or more validated group means "
-            "were missing."
+            f"The grouped average {metric} comparison could not be generated "
+            "because one or more validated group means were missing."
         )
     # Handle specific mean/average questions before the generic dataset summary.
     mean_terms = ("average", "avg", "mean")

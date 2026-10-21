@@ -1038,8 +1038,8 @@ def create_evidence(
         valid_result = (
             isinstance(no_group, dict)
             and isinstance(yes_group, dict)
-            and isinstance(no_group.get("mean_balance"), numeric_types)
-            and isinstance(yes_group.get("mean_balance"), numeric_types)
+            and isinstance(no_group.get("mean_value", no_group.get("mean")), numeric_types)
+            and isinstance(yes_group.get("mean_value", yes_group.get("mean")), numeric_types)
             and isinstance(no_group.get("row_count"), (int, np.integer))
             and isinstance(yes_group.get("row_count"), (int, np.integer))
             and isinstance(no_group.get("valid_value_count"), (int, np.integer))
@@ -1227,22 +1227,41 @@ def generate_pipeline_insight(
         groups = primary_result.get("group_results", {})
         no_group = groups.get("no", {}) if isinstance(groups, dict) else {}
         yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
-        no_mean = no_group.get("mean_balance")
-        yes_mean = yes_group.get("mean_balance")
+        no_mean = no_group.get("mean_value", no_group.get("mean"))
+        yes_mean = yes_group.get("mean_value", yes_group.get("mean"))
         difference = primary_result.get("mean_difference_yes_minus_no")
-        metric = str(primary_result.get("metric_column", "balance"))
+        metric_value = primary_result.get("metric_column")
+        metric = str(metric_value).strip() if metric_value is not None else ""
 
-        if all(isinstance(value, (int, float, np.integer, np.floating))
-               for value in (no_mean, yes_mean, difference)):
+        if not metric:
             return (
-                f"Average customer {metric} was {float(no_mean):,.2f} for non-subscribers "
+                "The grouped mean comparison cannot be summarized because the "
+                "requested metric column is missing from the validated result. "
+                "No substitute metric was used."
+            )
+
+        numeric_values = (no_mean, yes_mean, difference)
+        if all(
+            isinstance(value, (int, float, np.integer, np.floating))
+            and not isinstance(value, bool)
+            and np.isfinite(float(value))
+            for value in numeric_values
+        ):
+            direction = "higher" if float(difference) > 0 else (
+                "lower" if float(difference) < 0 else "the same as"
+            )
+            difference_magnitude = abs(float(difference))
+            return (
+                f"Average {metric} was {float(no_mean):,.2f} for non-subscribers "
                 f"and {float(yes_mean):,.2f} for subscribers. "
-                f"The subscriber group average was {float(difference):,.2f} higher "
-                f"(yes minus no). The comparison is descriptive and does not establish causation."
+                f"The subscriber group average was {difference_magnitude:,.2f} "
+                f"{direction} than the non-subscriber average "
+                f"(yes minus no = {float(difference):,.2f}). "
+                "The comparison is descriptive and does not establish causation."
             )
         return (
             f"The grouped average comparison for {metric} could not be summarized "
-            "because one or more required group means were missing."
+            "because one or more required group means were missing or non-numeric."
         )
 
     # A specific grouped conversion-rate question must not be routed to the

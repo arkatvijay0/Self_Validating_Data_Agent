@@ -5,6 +5,7 @@
 # ============================================================
 
 import os
+import re
 import pandas as pd
 
 
@@ -1103,11 +1104,7 @@ result = pd.DataFrame({
 
     grouped_mean_request = (
         any(word in step_lower.split() for word in ("mean", "average", "avg"))
-        and "balance" in step_lower
-        and any(
-            token in step_lower
-            for token in ("subscrib", "subscription")
-        )
+        and any(token in step_lower for token in ("subscrib", "subscription"))
         and any(
             token in step_lower
             for token in ("compare", "comparison", "across", "between", "group", "grouped", "by")
@@ -1115,72 +1112,120 @@ result = pd.DataFrame({
     )
 
     if grouped_mean_request:
-        code += '''
-required_columns = ["balance", "y"]
-missing_columns = [
-    column for column in required_columns
-    if column not in df.columns
-]
+        # Resolve the metric from the requested plan step. Never default to balance.
+        available_columns = []
+        profile_columns = (data_profile or {}).get("columns", {})
+        if isinstance(profile_columns, dict):
+            available_columns = list(profile_columns.keys())
+        if not available_columns:
+            try:
+                available_columns = list(pd.read_csv(filepath, nrows=0).columns)
+            except Exception:
+                available_columns = []
+        numeric_candidates = [
+            column for column in available_columns
+            if str(column).strip().lower() not in {"y", "conversion"}
+            and (
+                not isinstance(profile_columns, dict)
+                or not profile_columns
+                or profile_columns.get(column, {}).get("role") == "continuous"
+            )
+        ]
+        matched_metrics = [
+            column for column in numeric_candidates
+            if re.search(
+                r"(?<![\w])" + re.escape(str(column).replace("_", " ").lower()) + r"(?![\w])",
+                step_lower,
+            )
+        ]
+        if not matched_metrics:
+            aliases = {"account balance": "balance", "call duration": "duration"}
+            matched_metrics = [
+                destination for alias, destination in aliases.items()
+                if destination in numeric_candidates
+                and re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", step_lower)
+            ]
+        requested_metric_column = (
+            max(matched_metrics, key=lambda value: len(str(value)))
+            if matched_metrics else None
+        )
+        if requested_metric_column is None:
+            code += """result = {
+    "status": "UNSUPPORTED",
+    "analysis_type": "grouped_mean_analysis",
+    "reason": "The requested numeric metric could not be matched to a dataset column. No substitute metric was used.",
+    "available_columns": df.columns.tolist(),
+}
+"""
+            return code
 
-if missing_columns:
-    result = {
+        metric_literal = repr(str(requested_metric_column))
+        code += f'''group_column = "y" if "y" in df.columns else (
+    "conversion" if "conversion" in df.columns else None
+)
+required_columns = [{metric_literal}]
+if group_column is None:
+    result = {{
         "status": "FAIL",
         "analysis_type": "grouped_mean_analysis",
-        "reason": "Required columns missing: " + ", ".join(missing_columns),
-    }
+        "metric_column": {metric_literal},
+        "reason": "No supported subscription grouping column ('y' or 'conversion') was found.",
+        "available_columns": df.columns.tolist(),
+    }}
 else:
-    working = pd.DataFrame({
-        "subscription_status": (
-            df["y"].astype("string").str.strip().str.lower()
-        ),
-        "balance": pd.to_numeric(df["balance"], errors="coerce"),
-    })
-
-    working = working[
-        working["subscription_status"].isin(["yes", "no"])
-    ].copy()
-
-    grouped = working.groupby("subscription_status").agg(
-        row_count=("subscription_status", "size"),
-        valid_value_count=("balance", "count"),
-        mean_balance=("balance", "mean"),
-    )
-
-    group_results = {
-        str(status): {
-            "row_count": int(row["row_count"]),
-            "valid_value_count": int(row["valid_value_count"]),
-            "mean_balance": (
-                float(row["mean_balance"])
-                if pd.notna(row["mean_balance"])
-                else None
+    missing_columns = [column for column in required_columns if column not in df.columns]
+    if missing_columns:
+        result = {{
+            "status": "FAIL",
+            "analysis_type": "grouped_mean_analysis",
+            "metric_column": {metric_literal},
+            "group_column": group_column,
+            "reason": "Required columns missing: " + ", ".join(missing_columns),
+        }}
+    else:
+        metric_column = {metric_literal}
+        if group_column == "y":
+            subscription_status = df["y"].astype("string").str.strip().str.lower()
+        else:
+            conversion_values = pd.to_numeric(df["conversion"], errors="coerce")
+            subscription_status = conversion_values.map({{0: "no", 1: "yes"}}).astype("string")
+        working = pd.DataFrame({{
+            "subscription_status": subscription_status,
+            "metric_value": pd.to_numeric(df[metric_column], errors="coerce"),
+        }})
+        working = working[working["subscription_status"].isin(["yes", "no"])].copy()
+        grouped = working.groupby("subscription_status").agg(
+            row_count=("subscription_status", "size"),
+            valid_value_count=("metric_value", "count"),
+            mean_value=("metric_value", "mean"),
+        )
+        group_results = {{
+            str(status): {{
+                "row_count": int(row["row_count"]),
+                "valid_value_count": int(row["valid_value_count"]),
+                "mean_value": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+                "mean": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+            }}
+            for status, row in grouped.iterrows()
+        }}
+        both_groups_available = (
+            "yes" in group_results and "no" in group_results
+            and group_results["yes"]["mean_value"] is not None
+            and group_results["no"]["mean_value"] is not None
+        )
+        result = {{
+            "status": "PASS" if both_groups_available else "FAIL",
+            "analysis_type": "grouped_mean_analysis",
+            "metric_column": metric_column,
+            "group_column": group_column,
+            "group_results": group_results,
+            "mean_difference_yes_minus_no": (
+                group_results["yes"]["mean_value"] - group_results["no"]["mean_value"]
+                if both_groups_available else None
             ),
-        }
-        for status, row in grouped.iterrows()
-    }
-
-    both_groups_available = (
-        "yes" in group_results
-        and "no" in group_results
-        and group_results["yes"]["mean_balance"] is not None
-        and group_results["no"]["mean_balance"] is not None
-    )
-
-    result = {
-        "status": "PASS" if both_groups_available else "FAIL",
-        "analysis_type": "grouped_mean_analysis",
-        "metric_column": "balance",
-        "group_column": "y",
-        "group_results": group_results,
-        "mean_difference_yes_minus_no": (
-            group_results["yes"]["mean_balance"]
-            - group_results["no"]["mean_balance"]
-            if both_groups_available
-            else None
-        ),
-        "dataset_row_count": int(len(df)),
-        "analyzed_row_count": int(len(working)),
-    }
+            "dataset_row_count": int(len(df)),
+            "analyzed_row_count": int(len(working)),
+        }}
 '''
         return code
 
@@ -1195,7 +1240,6 @@ else:
         for word in ("mean", "average", "avg")
     ):
 
-        import re
 
         # Read column names from the actual dataset.
         try:

@@ -1255,7 +1255,7 @@ def map_insight_to_evidence(
         def get_group_mean(group):
             if not isinstance(group, dict):
                 return None
-            for key in ("mean_balance", "mean", "average", "mean_value"):
+            for key in ("mean_value", "mean", "average", "mean_balance", "mean_age"):
                 if group.get(key) is not None:
                     return _parse_claim_number(group.get(key))
             return None
@@ -1269,6 +1269,19 @@ def map_insight_to_evidence(
         insight_text = str(insight or "")
         insight_lower = insight_text.lower()
         checks = []
+        metric = source.get("metric_column")
+        metric_text = " ".join(str(metric or "").replace("_", " ").lower().split())
+        metric_pattern = (
+            r"(?<![\w])" + re.escape(metric_text) + r"(?![\w])"
+            if metric_text else None
+        )
+        metric_mentioned = bool(
+            metric_pattern and re.search(metric_pattern, insight_lower)
+        )
+        checks.append({
+            "check": "requested_metric_mentioned",
+            "status": "PASS" if metric_mentioned else "FAIL",
+        })
         groups_available = no_mean is not None and yes_mean is not None
         checks.append({
             "check": "both_group_means_available",
@@ -1305,6 +1318,7 @@ def map_insight_to_evidence(
             "analysis_type": "grouped_mean_analysis",
             "insight": insight,
             "group_results": groups,
+            "metric_column": metric,
             "mean_difference_yes_minus_no": difference,
             "checks": checks,
             "evidence_summary": create_evidence_summary(evidence),

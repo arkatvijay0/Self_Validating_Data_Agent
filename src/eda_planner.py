@@ -137,7 +137,7 @@ def generate_plan_mock(task_type, data_profile, user_query):
             f"Filter rows where the 'month' column equals '{month_code}', then calculate the mean of numeric 'duration' values and report the filtered row count and valid duration count."
         ]
 
-    # GROUPED MEAN: average balance by subscription outcome.
+    # GROUPED MEAN: compare the explicitly requested numeric metric by subscription outcome.
     grouped_mean_comparison = (
         task_type == "comparison"
         and any(term in query.split() for term in ("average", "mean", "avg"))
@@ -146,17 +146,38 @@ def generate_plan_mock(task_type, data_profile, user_query):
             for term in ("compare", "comparison", "across", "between")
         )
         and any(term in query for term in ("subscrib", "subscription"))
-        and "balance" in columns
-        and "y" in columns
+        and ("y" in columns or "conversion" in columns)
     )
 
     if grouped_mean_comparison:
-        group_column = "y"
+        group_column = "y" if "y" in columns else "conversion"
+        matched_metrics = [
+            col for col in columns
+            if col not in ("y", "conversion")
+            and data_profile.get("columns", {}).get(col, {}).get("role") == "continuous"
+            and re.search(
+                r"(?<![\w])" + re.escape(str(col).replace("_", " ")) + r"(?![\w])",
+                query,
+            )
+        ]
+        if not matched_metrics:
+            aliases = {
+                "account balance": "balance",
+                "call duration": "duration",
+            }
+            matched_metrics = [
+                destination for alias, destination in aliases.items()
+                if destination in columns
+                and re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", query)
+            ]
+        if not matched_metrics:
+            return [
+                "STOP: The requested numeric metric could not be matched to a dataset column. Do not substitute another metric."
+            ]
+        metric_column = max(matched_metrics, key=lambda value: len(str(value)))
         return [
-            f"Compare the average balance grouped by subscription outcome using '{group_column}' (yes/no). Report the row count, valid numeric count, and mean balance for each group, plus the difference between the yes and no group means.",
-
-f"Independently recompute and validate the average balance grouped by subscription outcome using '{group_column}' (yes/no), reporting each group's row count, valid numeric count, mean balance, and the yes-minus-no difference."
-
+            f"Compare the average '{metric_column}' grouped by subscription outcome using '{group_column}' (yes/no). Report each group's row count, valid numeric count, mean, and the yes-minus-no difference.",
+            f"Independently recompute and validate the average '{metric_column}' grouped by subscription outcome using '{group_column}' (yes/no), reporting each group's row count, valid numeric count, mean, and the yes-minus-no difference."
         ]
 
 
