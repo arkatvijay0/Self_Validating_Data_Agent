@@ -496,15 +496,66 @@ def execute_self_correcting_step(
     # PREPARE DATA INFORMATION
     # =====================================================
 
-    if dataset_columns is None:
-
-        dataset_columns = get_dataset_columns(
-            filepath
-        )
-
     if target_columns is None:
-
         target_columns = []
+
+    normalized_step = str(step_text).strip().lower()
+    is_isolation_forest_step = (
+        "isolation forest" in normalized_step
+        and "detect multivariate anomalies" in normalized_step
+    )
+
+    if dataset_columns is None:
+        try:
+            dataset_columns = get_dataset_columns(filepath)
+        except Exception as error:
+            if not is_isolation_forest_step:
+                raise
+
+            error_text = f"{type(error).__name__}: {error}"
+            current_code = (
+                "Dedicated Isolation Forest execution via "
+                "detect_anomalies()"
+            )
+            validation_result = {
+                "overall": "FAIL",
+                "checks": {
+                    "isolation_forest": {
+                        "pass": False,
+                        "reason": error_text,
+                    }
+                },
+            }
+            execution_result = {
+                "status": "FAIL",
+                "success": False,
+                "stdout": "",
+                "stderr": error_text,
+                "result": None,
+            }
+            attempt_record = {
+                "attempt": 1,
+                "code": current_code,
+                "execution": execution_result,
+                "validation": validation_result,
+                "feedback": {
+                    "overall": "FAIL",
+                    "isolation_forest": error_text,
+                },
+                "correction": None,
+            }
+
+            return {
+                "status": "UNRESOLVED",
+                "step_number": step_number,
+                "step": step_text,
+                "attempts": [attempt_record],
+                "total_attempts": 1,
+                "final_code": current_code,
+                "final_execution": execution_result,
+                "final_validation": validation_result,
+                "final_result": None,
+            }
 
     # =====================================================
     # DEDICATED ISOLATION FOREST EXECUTION
