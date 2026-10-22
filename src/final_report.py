@@ -233,6 +233,27 @@ def create_final_report(
         except (TypeError, ValueError):
             early_claim_failure = True
         early_claim_failure = early_claim_failure or early_claims.get("status") == "FAIL"
+    grouped_user_claim_status_for_insight = ""
+    if isinstance(insight_validation, dict):
+        checks_for_insight_status = insight_validation.get("checks", {})
+        if isinstance(checks_for_insight_status, dict):
+            grouped_check_for_insight_status = checks_for_insight_status.get(
+                "grouped_mean_claim_validation", {}
+            )
+            if isinstance(grouped_check_for_insight_status, dict):
+                user_check_for_insight_status = grouped_check_for_insight_status.get(
+                    "user_claim_validation", {}
+                )
+                if isinstance(user_check_for_insight_status, dict):
+                    grouped_user_claim_status_for_insight = str(
+                        user_check_for_insight_status.get("status", "")
+                    ).upper()
+
+    # When grouped validation explicitly separates the user's unsupported claim,
+    # do not mislabel an otherwise accurate generated insight as invalid.
+    if grouped_user_claim_status_for_insight == "NOT_SUPPORTED":
+        early_claim_failure = False
+
     if early_claim_failure:
         insight_status = "FAIL"
 
@@ -355,6 +376,26 @@ def create_final_report(
                     f"Failed Claims: "
                     f"{failed_claims}"
                 )
+
+    # Report the user's directional claim separately from insight accuracy.
+    validation_checks_for_claim = (
+        insight_validation.get("checks", {})
+        if isinstance(insight_validation, dict) else {}
+    )
+    grouped_check_for_claim = (
+        validation_checks_for_claim.get("grouped_mean_claim_validation", {})
+        if isinstance(validation_checks_for_claim, dict) else {}
+    )
+    user_claim_check_for_report = (
+        grouped_check_for_claim.get("user_claim_validation", {})
+        if isinstance(grouped_check_for_claim, dict) else {}
+    )
+    if isinstance(user_claim_check_for_report, dict):
+        user_claim_status_for_report = str(user_claim_check_for_report.get("status", "")).upper()
+        if user_claim_status_for_report in {"SUPPORTED", "NOT_SUPPORTED", "NOT_ASSESSED", "REVIEW"}:
+            report_lines.append(f"User Claim Verdict: {user_claim_status_for_report}")
+            if user_claim_check_for_report.get("reason"):
+                report_lines.append(f"User Claim Explanation: {user_claim_check_for_report['reason']}")
 
     report_lines.append("")
 
@@ -566,6 +607,22 @@ def create_final_report(
             or claim_validation_for_reliability.get("pass") is False
             or failed_claim_count > 0
         )
+    grouped_user_claim_for_reliability = {}
+    if isinstance(insight_validation, dict):
+        validation_checks_for_reliability = insight_validation.get("checks", {})
+        if isinstance(validation_checks_for_reliability, dict):
+            grouped_validation_for_reliability = validation_checks_for_reliability.get(
+                "grouped_mean_claim_validation", {}
+            )
+            if isinstance(grouped_validation_for_reliability, dict):
+                grouped_user_claim_for_reliability = grouped_validation_for_reliability.get(
+                    "user_claim_validation", {}
+                )
+    user_claim_not_supported = (
+        isinstance(grouped_user_claim_for_reliability, dict)
+        and str(grouped_user_claim_for_reliability.get("status", "")).upper() == "NOT_SUPPORTED"
+    )
+
     mapping_failed = str(mapping_for_reliability.get("status", "")).upper() == "FAIL"
     # REVIEW means source references are incomplete, not that the numerical
     # result or recommendation is invalid. Keep it visible in the report, but
@@ -594,7 +651,7 @@ def create_final_report(
 
         overall_reliability = "FAIL"
 
-    if claim_failed or mapping_failed:
+    if claim_failed or mapping_failed or user_claim_not_supported:
         overall_reliability = "FAIL"
 
     report_lines.append(
@@ -709,6 +766,11 @@ def create_final_report(
             else "REVIEW"
         )
         report_lines.append(f"Claim-Level Validation: {claim_summary_status}")
+
+    if isinstance(grouped_user_claim_for_reliability, dict) and grouped_user_claim_for_reliability.get("status"):
+        report_lines.append(
+            f"User Claim Verdict: {str(grouped_user_claim_for_reliability.get('status')).upper()}"
+        )
 
     if mapping_for_reliability:
         report_lines.append(f"Insight Mapping: {mapping_for_reliability.get('status', 'NOT PROVIDED')}")
