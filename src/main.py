@@ -1978,6 +1978,19 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         task_analysis
     )
 
+    # Stop before planning or execution when the user's claim is contradictory.
+    # The task analyzer has already identified that clarification is required.
+    if task_analysis.get("ambiguous_direction_claim"):
+        clarification = (
+            "Your question contains contradictory direction terms: 'higher' and 'lower'. "
+            "Please clarify whether you want to check if subscribers have a higher or "
+            "lower average balance than non-subscribers."
+        )
+        print_section("CLARIFICATION REQUIRED")
+        print(clarification)
+        print("No EDA plan was generated and no analysis was executed.")
+        return None
+
     # =====================================================
     # STEP 3 - EDA PLAN
     # =====================================================

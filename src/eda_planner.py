@@ -28,7 +28,20 @@ def generate_plan_mock(task_type, data_profile, user_query):
         if info.get("role") == "time_index"
     ]
 
-    query = user_query.lower()
+    query = str(user_query or "").lower()
+
+    # Stop contradictory subscriber-direction claims before planning calculations.
+    has_subscriber_comparison = (
+        any(re.search(r"(?<![\\w])" + re.escape(term) + r"(?![\\w])", query) for term in ("subscriber", "subscribers", "subscription"))
+        and any(re.search(r"(?<![\\w])" + re.escape(term) + r"(?![\\w])", query) for term in ("non-subscriber", "non subscriber", "non-subscribers", "non subscribers"))
+        and ("y" in columns or "conversion" in columns)
+    )
+    has_higher_direction = re.search(r"\bhigher\b", query) is not None
+    has_lower_direction = re.search(r"\blower\b(?![-\w])", query) is not None
+    if has_subscriber_comparison and has_higher_direction and has_lower_direction:
+        return [
+            "STOP: The question contains contradictory direction terms ('higher' and 'lower'). Do not generate or execute analysis code. Ask the user to clarify whether they mean higher or lower average balance."
+        ]
 
     # BANK_CONVERSION_ROUTING_FIX_V1
     # Match natural-language names to columns actually present in this dataset.
@@ -139,11 +152,21 @@ def generate_plan_mock(task_type, data_profile, user_query):
 
     # GROUPED MEAN: compare the explicitly requested numeric metric by subscription outcome.
     grouped_mean_comparison = (
-        task_type == "comparison"
-        and any(term in query.split() for term in ("average", "mean", "avg"))
-        and any(
-            term in query
-            for term in ("compare", "comparison", "across", "between")
+        any(term in query.split() for term in ("average", "mean", "avg"))
+        and (
+            any(
+                term in query
+                for term in (
+                    "compare", "comparison", "across", "between",
+                    "separately", "group means", "grouped mean",
+                    "validate this claim", "check this claim",
+                    "higher than", "lower than", "greater than", "less than",
+                    "more than", "fewer than",
+                )
+            )
+            or (
+                "subscriber" in query and "non-subscriber" in query
+            )
         )
         and any(term in query for term in ("subscrib", "subscription"))
         and ("y" in columns or "conversion" in columns)

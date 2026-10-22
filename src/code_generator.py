@@ -1107,7 +1107,12 @@ result = pd.DataFrame({
         and any(token in step_lower for token in ("subscrib", "subscription"))
         and any(
             token in step_lower
-            for token in ("compare", "comparison", "across", "between", "group", "grouped", "by")
+            for token in (
+                "compare", "comparison", "across", "between", "group",
+                "grouped", "by", "separately", "group means",
+                "higher than", "lower than", "greater than", "less than",
+                "more than", "fewer than", "validate this claim", "check this claim",
+            )
         )
     )
 

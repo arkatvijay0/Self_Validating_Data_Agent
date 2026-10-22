@@ -125,6 +125,30 @@ def analyze_task_mock(user_query, data_profile):
     )
     outcome_column = "conversion" if "conversion" in columns else ("y" if "y" in columns else None)
 
+    # Reject contradictory directional wording before ordinary task routing.
+    # Example: "subscribers have a higher lower balance than non-subscribers".
+    has_subscriber_comparison = (
+        any(_contains_term(query, term) for term in ("subscriber", "subscribers", "subscription"))
+        and any(_contains_term(query, term) for term in ("non-subscriber", "non subscriber", "non-subscribers", "non subscribers"))
+        and outcome_column is not None
+    )
+    has_higher_direction = re.search(r"\bhigher\b", query) is not None
+    has_lower_direction = re.search(r"\blower\b(?![-\w])", query) is not None
+    if has_subscriber_comparison and has_higher_direction and has_lower_direction:
+        return {
+            "task_type": "comparison",
+            "target_columns": list(dict.fromkeys(query_column_matches + [outcome_column])),
+            "group_column": outcome_column,
+            "analysis_intent": "ambiguous_direction_claim",
+            "ambiguous_direction_claim": True,
+            "unsupported_metric": False,
+            "notes": (
+                "The claim contains contradictory direction terms ('higher' and 'lower'). "
+                "Do not generate or execute an analysis yet. Ask the user to clarify whether "
+                "they mean higher or lower average balance."
+            ),
+        }
+
     if conversion_rate_comparison and outcome_column:
         requested_factors = [
             c for c in query_column_matches
@@ -173,9 +197,21 @@ def analyze_task_mock(user_query, data_profile):
     # Preserve the numeric metric explicitly requested by the user.
     grouped_mean_comparison_intent = (
         has_mean_intent
-        and any(
-            _contains_term(query, term)
-            for term in ("compare", "comparison", "across", "between")
+        and (
+            any(
+                _contains_term(query, term)
+                for term in (
+                    "compare", "comparison", "across", "between",
+                    "separately", "group means", "grouped mean",
+                    "validate this claim", "check this claim",
+                    "higher than", "lower than", "greater than", "less than",
+                    "more than", "fewer than",
+                )
+            )
+            or (
+                _contains_term(query, "subscriber")
+                and _contains_term(query, "non-subscriber")
+            )
         )
         and any(term in query for term in ("subscrib", "subscription"))
         and ("y" in profile_columns or "conversion" in profile_columns)
