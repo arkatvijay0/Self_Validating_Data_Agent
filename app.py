@@ -337,16 +337,35 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
                 mime="text/plain",
             )
 
-            if (
-                "Overall reliability\n------------------------------------------------------------\nPASS"
-                in report_text
-                or "Overall reliability: PASS" in report_text
-            ):
+            # Determine reliability only from the dedicated report section.
+            # A FAIL elsewhere in the report must not override an actual PASS.
+            reliability_status = None
+            report_lines = report_text.splitlines()
+            for index, line in enumerate(report_lines):
+                if re.match(r"^\s*(?:\d+\.\s*)?OVERALL RELIABILITY\s*$", line, re.IGNORECASE):
+                    for status_line in report_lines[index + 1:index + 5]:
+                        candidate = status_line.strip().upper()
+                        if candidate in {"PASS", "FAIL", "REVIEW"}:
+                            reliability_status = candidate
+                            break
+                    break
+
+            if reliability_status == "PASS":
                 st.success("Overall reliability: PASS")
-            elif "Overall reliability" in report_text and "FAIL" in report_text:
+            elif reliability_status == "FAIL":
                 st.warning(
                     "The report indicates a validation/reliability failure. "
-                    "Review the insight and question relevance checks."
+                    "Review the insight validation, metric claims, and evidence."
+                )
+            elif reliability_status == "REVIEW":
+                st.info(
+                    "Overall reliability requires review. Inspect the validation "
+                    "details and supporting evidence before relying on the result."
+                )
+            else:
+                st.warning(
+                    "Could not determine overall reliability from the report's "
+                    "Overall Reliability section. Review the full report."
                 )
         else:
             st.warning(

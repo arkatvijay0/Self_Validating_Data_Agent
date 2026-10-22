@@ -254,32 +254,41 @@ def create_final_report(
             {}
         )
 
-        presence = checks.get(
-            "presence",
-            {}
-        )
+        # Support both the legacy validation schema and the current
+        # multi-metric claim-validation schema.
+        multi_metric_check = checks.get("multi_metric_claim_validation")
+        if isinstance(multi_metric_check, dict):
+            metric_checks = multi_metric_check.get("metrics", {})
+            if not isinstance(metric_checks, dict):
+                metric_checks = {}
 
-        result_check = checks.get(
-            "result",
-            {}
+            # Presence passes only when every requested metric is represented
+            # by name. An empty metrics dictionary must not pass by default.
+            presence_pass = bool(metric_checks) and all(
+                isinstance(metric_check, dict)
+                and metric_check.get("metric_named") is True
+                for metric_check in metric_checks.values()
+            )
+
+            # The multi-metric validator's pass flag reflects the full set of
+            # metric claims, including whether the values/differences validate.
+            result_pass = multi_metric_check.get("pass") is True
+        else:
+            presence = checks.get("presence", {})
+            result_check = checks.get("result", {})
+            presence_pass = (
+                isinstance(presence, dict) and presence.get("pass") is True
+            )
+            result_pass = (
+                isinstance(result_check, dict) and result_check.get("pass") is True
+            )
+
+        report_lines.append(
+            "Presence Check: " + ("PASS" if presence_pass else "FAIL")
         )
 
         report_lines.append(
-            "Presence Check: "
-            + (
-                "PASS"
-                if presence.get("pass") is True
-                else "FAIL"
-            )
-        )
-
-        report_lines.append(
-            "Result Check: "
-            + (
-                "PASS"
-                if result_check.get("pass") is True
-                else "FAIL"
-            )
+            "Result Check: " + ("PASS" if result_pass else "FAIL")
         )
 
         # --------------------------------------------------
@@ -552,7 +561,8 @@ def create_final_report(
         except (TypeError, ValueError):
             failed_claim_count = 0
         claim_failed = (
-            claim_validation_for_reliability.get("overall") == "FAIL"
+            str(claim_validation_for_reliability.get("overall", "")).upper() == "FAIL"
+            or str(claim_validation_for_reliability.get("status", "")).upper() == "FAIL"
             or claim_validation_for_reliability.get("pass") is False
             or failed_claim_count > 0
         )
@@ -683,8 +693,11 @@ def create_final_report(
 
     if isinstance(claim_validation_for_reliability, dict):
         claim_summary_status = "FAIL" if claim_failed else (
-            "PASS" if claim_validation_for_reliability.get("overall") == "PASS"
-            or claim_validation_for_reliability.get("pass") is True else "REVIEW"
+            "PASS"
+            if str(claim_validation_for_reliability.get("overall", "")).upper() == "PASS"
+            or str(claim_validation_for_reliability.get("status", "")).upper() == "PASS"
+            or claim_validation_for_reliability.get("pass") is True
+            else "REVIEW"
         )
         report_lines.append(f"Claim-Level Validation: {claim_summary_status}")
 
