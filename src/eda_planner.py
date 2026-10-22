@@ -174,11 +174,21 @@ def generate_plan_mock(task_type, data_profile, user_query):
             return [
                 "STOP: The requested numeric metric could not be matched to a dataset column. Do not substitute another metric."
             ]
-        metric_column = max(matched_metrics, key=lambda value: len(str(value)))
-        return [
-            f"Compare the average '{metric_column}' grouped by subscription outcome using '{group_column}' (yes/no). Report each group's row count, valid numeric count, mean, and the yes-minus-no difference.",
-            f"Independently recompute and validate the average '{metric_column}' grouped by subscription outcome using '{group_column}' (yes/no), reporting each group's row count, valid numeric count, mean, and the yes-minus-no difference."
-        ]
+        plan = []
+        for metric_column in matched_metrics:
+            plan.append(
+                f"Compare the average '{metric_column}' grouped by "
+                f"subscription outcome using '{group_column}' (yes/no). "
+                "Report each group's row count, valid numeric count, mean, "
+                "and the yes-minus-no difference."
+            )
+            plan.append(
+                f"Independently recompute and validate the average "
+                f"'{metric_column}' grouped by subscription outcome using "
+                f"'{group_column}' (yes/no), reporting each group's row "
+                "count, valid numeric count, mean, and the yes-minus-no difference."
+            )
+        return plan
 
 
 

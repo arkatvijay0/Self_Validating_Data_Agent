@@ -777,7 +777,19 @@ def attach_evidence_traceability(mapped_evidence, evidence):
         return mapped_evidence
 
     analysis_type = str(evidence.get("analysis_type", "unknown"))
-    if analysis_type == "grouped_mean_analysis":
+    if analysis_type == "multi_metric_grouped_mean_analysis":
+        metric_results = evidence.get("metric_results", {})
+        if isinstance(metric_results, dict):
+            for metric, result in metric_results.items():
+                sources.append({
+                    "source_id": f"primary_result.metric_results.{metric}",
+                    "source_type": "validated_grouped_mean_result",
+                    "group_column": evidence.get("group_column"),
+                    "metric_column": metric,
+                    "aggregation": "mean",
+                    "result": safe_json_value(result),
+                })
+    elif analysis_type == "grouped_mean_analysis":
         sources.append({
             "source_id": "primary_result.group_results",
             "source_type": "validated_grouped_mean_result",
@@ -893,6 +905,304 @@ def get_primary_result(
     )
 
 
+
+
+# =========================================================
+# MULTI-METRIC GROUPED-MEAN COMPARISON
+# =========================================================
+
+def _is_valid_grouped_mean_result(result):
+    """Return True only when a grouped-mean result has both groups and finite means."""
+    if not isinstance(result, dict):
+        return False
+    if str(result.get("analysis_type", "")).lower() != "grouped_mean_analysis":
+        return False
+    groups = result.get("group_results")
+    if not isinstance(groups, dict):
+        return False
+    no_group = groups.get("no")
+    yes_group = groups.get("yes")
+    if not isinstance(no_group, dict) or not isinstance(yes_group, dict):
+        return False
+
+    def finite_number(value):
+        return (
+            isinstance(value, (int, float, np.integer, np.floating))
+            and not isinstance(value, (bool, np.bool_))
+            and np.isfinite(float(value))
+        )
+
+    no_mean = no_group.get("mean_value", no_group.get("mean"))
+    yes_mean = yes_group.get("mean_value", yes_group.get("mean"))
+    difference = result.get("mean_difference_yes_minus_no")
+    return finite_number(no_mean) and finite_number(yes_mean) and finite_number(difference)
+
+
+def build_multi_metric_grouped_mean_result(task_analysis, execution_results):
+    """
+    Assemble all requested grouped-mean metrics from validated executor steps.
+
+    A metric is included only when a corresponding successful, structurally valid
+    grouped-mean result exists. Missing requested metrics force status=FAIL.
+    """
+    if not isinstance(task_analysis, dict) or not isinstance(execution_results, dict):
+        return None
+
+    requested = task_analysis.get("requested_metric_columns", [])
+    if not isinstance(requested, list):
+        return None
+
+    requested = list(dict.fromkeys(
+        str(column).strip() for column in requested
+        if isinstance(column, str) and str(column).strip()
+    ))
+    if len(requested) < 2:
+        return None
+
+    steps = execution_results.get("steps", [])
+    if not isinstance(steps, list):
+        steps = []
+
+    metric_results = {}
+    for metric in requested:
+        candidates = []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+
+            # Do not promote failed execution/validation attempts into the report.
+            status = str(step.get("status", "")).upper()
+            execution_status = str(step.get("execution_status", "")).upper()
+            validation_status = str(step.get("validation_status", "")).upper()
+            success_labels = {"PASS", "SUCCESS", "OK"}
+            if status not in success_labels:
+                continue
+            if execution_status and execution_status not in success_labels:
+                continue
+            if validation_status and validation_status not in success_labels:
+                continue
+
+            result = step.get("final_result")
+            if not isinstance(result, dict):
+                result = step.get("result")
+            if (
+                isinstance(result, dict)
+                and str(result.get("metric_column", "")).strip() == metric
+                and _is_valid_grouped_mean_result(result)
+            ):
+                candidates.append((step, result))
+
+        if candidates:
+            # Prefer the first actual comparison result over a later independent
+            # validation/recomputation step when both have the same metric.
+            preferred = next(
+                (
+                    item for item in candidates
+                    if "compare" in str(item[0].get("step", "")).lower()
+                ),
+                candidates[0],
+            )
+            metric_results[metric] = safe_json_value(preferred[1])
+
+    missing = [metric for metric in requested if metric not in metric_results]
+    all_valid = not missing and all(
+        _is_valid_grouped_mean_result(result)
+        for result in metric_results.values()
+    )
+
+    first_result = next(iter(metric_results.values()), {})
+    return {
+        "status": "PASS" if all_valid else "FAIL",
+        "analysis_type": "multi_metric_grouped_mean_analysis",
+        "group_column": first_result.get("group_column", task_analysis.get("group_column", "y")),
+        "requested_metric_columns": requested,
+        "metric_results": metric_results,
+        "validated_metric_count": len(metric_results),
+        "requested_metric_count": len(requested),
+        "missing_metrics": missing,
+        "reason": None if all_valid else (
+            "One or more requested metrics are missing or failed grouped-mean validation: "
+            + ", ".join(missing or requested)
+        ),
+    }
+
+
+def generate_multi_metric_grouped_mean_insight(combined_result):
+    """Create one deterministic insight that explicitly reports every requested metric."""
+    if not isinstance(combined_result, dict):
+        return "The multi-metric comparison could not be generated because the combined result is missing."
+
+    requested = combined_result.get("requested_metric_columns", [])
+    results = combined_result.get("metric_results", {})
+    missing = combined_result.get("missing_metrics", [])
+    if combined_result.get("status") != "PASS" or missing:
+        missing_text = ", ".join(missing) if missing else "one or more requested metrics"
+        return (
+            "The multi-metric comparison could not be fully validated. "
+            f"Missing or invalid results: {missing_text}. No incomplete comparison is reported as complete."
+        )
+
+    statements = []
+    for metric in requested:
+        result = results.get(metric)
+        if not _is_valid_grouped_mean_result(result):
+            return f"The comparison for {metric} failed structural validation."
+        groups = result["group_results"]
+        no_group = groups["no"]
+        yes_group = groups["yes"]
+        no_mean = float(no_group.get("mean_value", no_group.get("mean")))
+        yes_mean = float(yes_group.get("mean_value", yes_group.get("mean")))
+        difference = float(result["mean_difference_yes_minus_no"])
+        direction = "higher" if difference > 0 else "lower" if difference < 0 else "the same"
+        statements.append(
+            f"{metric}: non-subscriber average = {no_mean:,.2f}, "
+            f"subscriber average = {yes_mean:,.2f}, "
+            f"subscriber-minus-non-subscriber difference = {difference:+,.2f} "
+            f"(subscriber average is {direction})."
+        )
+
+    return (
+        "Average comparison between customers who subscribed and those who did not: "
+        + " ".join(statements)
+        + " These are descriptive differences and do not establish causation."
+    )
+
+
+def build_multi_metric_evidence_mapping(insight, evidence, insight_validation):
+    """Create deterministic evidence mapping for every requested grouped-mean metric."""
+    evidence = evidence if isinstance(evidence, dict) else {}
+    results = evidence.get("metric_results", {})
+    requested = evidence.get("requested_metric_columns", [])
+    text = str(insight or "").lower()
+
+    metric_checks = {}
+    for metric in requested if isinstance(requested, list) else []:
+        metric_result = results.get(metric) if isinstance(results, dict) else None
+        metric_checks[metric] = {
+            "result_present": _is_valid_grouped_mean_result(metric_result),
+            "metric_named_in_insight": str(metric).lower() in text,
+        }
+        metric_checks[metric]["pass"] = all(metric_checks[metric].values())
+
+    insight_pass = (
+        isinstance(insight_validation, dict)
+        and insight_validation.get("pass") is True
+        and str(insight_validation.get("overall", "")).upper() == "PASS"
+    )
+    evidence_pass = (
+        evidence.get("status") == "PASS"
+        and isinstance(results, dict)
+        and len(results) == len(requested)
+        and bool(requested)
+    )
+    metrics_pass = bool(metric_checks) and all(
+        check.get("pass") is True for check in metric_checks.values()
+    )
+    passed = evidence_pass and metrics_pass and insight_pass
+
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "analysis_type": "multi_metric_grouped_mean_analysis",
+        "claim_validation": {
+            "status": "PASS" if metrics_pass else "FAIL",
+            "total_claims": len(metric_checks),
+            "passed_claims": sum(1 for check in metric_checks.values() if check.get("pass")),
+            "failed_claims": sum(1 for check in metric_checks.values() if not check.get("pass")),
+            "checks": metric_checks,
+        },
+        "evidence_validation": {
+            "status": "PASS" if evidence_pass else "FAIL",
+            "requested_metric_count": len(requested) if isinstance(requested, list) else 0,
+            "evidence_metric_count": len(results) if isinstance(results, dict) else 0,
+        },
+        "insight_validation": {
+            "status": "PASS" if insight_pass else "FAIL",
+        },
+        "reason": None if passed else (
+            "Multi-metric evidence mapping requires valid evidence and insight claims "
+            "for every requested metric."
+        ),
+    }
+
+
+def validate_multi_metric_grouped_mean_insight(insight, combined_result, base_validation=None):
+    """Require every requested metric and its means/difference to be present in the insight."""
+    requested = (
+        combined_result.get("requested_metric_columns", [])
+        if isinstance(combined_result, dict) else []
+    )
+    results = (
+        combined_result.get("metric_results", {})
+        if isinstance(combined_result, dict) else {}
+    )
+    text = str(insight or "").lower()
+    checks = {}
+
+    def number_present(expected):
+        expected = float(expected)
+        # Match the formatted number with or without thousands separators.
+        token = f"{expected:,.2f}".lower()
+        plain = f"{expected:.2f}".lower()
+        return token in text or plain in text
+
+    for metric in requested:
+        result = results.get(metric)
+        metric_ok = _is_valid_grouped_mean_result(result)
+        groups = result.get("group_results", {}) if metric_ok else {}
+        no_group = groups.get("no", {}) if isinstance(groups, dict) else {}
+        yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
+        no_mean = no_group.get("mean_value", no_group.get("mean"))
+        yes_mean = yes_group.get("mean_value", yes_group.get("mean"))
+        difference = result.get("mean_difference_yes_minus_no") if metric_ok else None
+
+        checks[metric] = {
+            "result_valid": metric_ok,
+            "metric_named": str(metric).lower() in text,
+            "non_subscriber_mean_present": metric_ok and number_present(no_mean),
+            "subscriber_mean_present": metric_ok and number_present(yes_mean),
+            "difference_present": metric_ok and number_present(difference),
+        }
+        checks[metric]["pass"] = all(
+            value for key, value in checks[metric].items() if key != "pass"
+        )
+
+    all_metrics_pass = (
+        bool(requested)
+        and len(requested) == len(results)
+        and all(item.get("pass") for item in checks.values())
+        and isinstance(combined_result, dict)
+        and combined_result.get("status") == "PASS"
+    )
+    base_pass = True
+    if isinstance(base_validation, dict):
+        if "pass" in base_validation:
+            base_pass = base_validation.get("pass") is True
+        elif "overall" in base_validation:
+            base_pass = str(base_validation.get("overall")).upper() == "PASS"
+
+    passed = all_metrics_pass and base_pass
+    return {
+        "overall": "PASS" if passed else "FAIL",
+        "pass": passed,
+        "checks": {
+            "multi_metric_claim_validation": {
+                "pass": all_metrics_pass,
+                "requested_metric_count": len(requested),
+                "validated_metric_count": len(results),
+                "metrics": checks,
+            },
+            "base_insight_validation": {
+                "pass": base_pass,
+                "result": base_validation,
+            },
+        },
+        "reason": None if passed else (
+            "Every requested metric must have a valid result and its metric name, "
+            "both group means, and difference must appear in the insight."
+        ),
+    }
+
+
 # =========================================================
 # CREATE EVIDENCE
 # =========================================================
@@ -945,6 +1255,38 @@ def create_evidence(
     analysis_type = str(
         analysis_type
     ).lower()
+
+    # Multi-metric grouped means must be preserved as a single evidence bundle.
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "multi_metric_grouped_mean_analysis"
+    ):
+        valid = (
+            primary_result.get("status") == "PASS"
+            and isinstance(primary_result.get("metric_results"), dict)
+            and primary_result.get("requested_metric_count")
+                == primary_result.get("validated_metric_count")
+            and not primary_result.get("missing_metrics")
+            and all(
+                _is_valid_grouped_mean_result(value)
+                for value in primary_result["metric_results"].values()
+            )
+        )
+        payload = safe_json_value(primary_result)
+        return {
+            "status": "PASS" if valid else "FAIL",
+            "analysis_type": "multi_metric_grouped_mean_analysis",
+            "group_column": primary_result.get("group_column"),
+            "requested_metric_columns": primary_result.get("requested_metric_columns", []),
+            "metric_results": safe_json_value(primary_result.get("metric_results", {})),
+            "supporting_result": payload,
+            "result": payload,
+            "evidence_summary": json.dumps(payload, indent=2, ensure_ascii=False),
+            "reason": None if valid else primary_result.get(
+                "reason", "One or more requested metric results failed validation."
+            ),
+        }
 
     # Preserve the real conversion-factor result; do not send it to
     # the legacy Pearson correlation or sales/profit evidence branches.
@@ -1217,6 +1559,13 @@ def generate_pipeline_insight(
         )
     ).lower()
 
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "multi_metric_grouped_mean_analysis"
+    ):
+        return generate_multi_metric_grouped_mean_insight(primary_result)
+
     # A grouped mean comparison must use the validated group means, not a
     # generic overall mean or a sales-specific grouped-series fallback.
     if (
@@ -1359,6 +1708,22 @@ def generate_pipeline_recommendation(
             f"Consider further analysis of the {top_category} group for {primary_result.get('group_column', 'the requested factor')}, which has the highest observed "
             f"conversion rate at {top_rate:.2f}%{count_detail}. Compare sample sizes and customer characteristics "
             "before allocating resources; this descriptive association does not establish causation."
+        )
+
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "multi_metric_grouped_mean_analysis"
+    ):
+        if primary_result.get("status") != "PASS":
+            return (
+                "Do not make decisions from this comparison yet. Validate all requested "
+                "metric-specific group means and rerun the analysis."
+            )
+        return (
+            "Review age, balance, and campaign differences together with group sizes, "
+            "data quality, and other customer characteristics before deciding on "
+            "targeting strategies. These descriptive comparisons do not establish causation."
         )
 
     if (
@@ -1781,6 +2146,15 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         DATA_PATH
     )
 
+    # For explicit multi-metric grouped-mean questions, promote a combined result
+    # so downstream insight, validation, evidence, and reporting see every metric.
+    combined_multi_metric_result = build_multi_metric_grouped_mean_result(
+        task_analysis,
+        execution_results
+    )
+    if combined_multi_metric_result is not None:
+        primary_result = combined_multi_metric_result
+
     print(
         "\nPrimary Validated Result:"
     )
@@ -1942,6 +2316,7 @@ def main(dataset_path=None, user_question=None, test_fault=False):
     if str(result_analysis_type).lower() in (
         "conversion_factor_analysis",
         "grouped_mean_analysis",
+        "multi_metric_grouped_mean_analysis",
     ):
         analysis_type = str(result_analysis_type).lower()
     else:
@@ -2003,6 +2378,18 @@ def main(dataset_path=None, user_question=None, test_fault=False):
     user_question=user_question,
     data_profile=data_profile
     )
+
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "multi_metric_grouped_mean_analysis"
+    ):
+        base_insight_validation = insight_validation
+        insight_validation = validate_multi_metric_grouped_mean_insight(
+            insight=insight,
+            combined_result=primary_result,
+            base_validation=base_insight_validation,
+        )
 
     print(
         "Insight Validation Result:"
@@ -2081,6 +2468,20 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         insight,
         evidence
     )
+
+    # Use a deterministic per-metric mapping for multi-metric comparisons.
+    # The generic mapper may be designed around a single primary result.
+    if (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        == "multi_metric_grouped_mean_analysis"
+    ):
+        mapped_evidence = build_multi_metric_evidence_mapping(
+            insight=insight,
+            evidence=evidence,
+            insight_validation=insight_validation,
+        )
+
     mapped_evidence = attach_evidence_traceability(
         mapped_evidence,
         evidence

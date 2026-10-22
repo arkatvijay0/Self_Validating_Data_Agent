@@ -188,9 +188,10 @@ def analyze_task_mock(user_query, data_profile):
             if column in profile_columns
             and profile_columns.get(column, {}).get("role") == "continuous"
         ]
+        requested_metric_columns = list(dict.fromkeys(requested_numeric_columns))
         metric_column = (
-            max(requested_numeric_columns, key=lambda value: len(str(value)))
-            if requested_numeric_columns else None
+            max(requested_metric_columns, key=lambda value: len(str(value)))
+            if requested_metric_columns else None
         )
         if metric_column is None:
             metric_phrase = _metric_phrase(query)
@@ -222,15 +223,16 @@ def analyze_task_mock(user_query, data_profile):
             }
         return {
             "task_type": "comparison",
-            "target_columns": [metric_column, group_column],
+            "target_columns": requested_metric_columns + [group_column],
             "metric_column": metric_column,
+            "requested_metric_columns": requested_metric_columns,
             "group_column": group_column,
             "comparison_metric": "mean",
             "requested_metric": metric_column,
             "unsupported_metric": False,
             "notes": (
-                f"Compare average '{metric_column}' across subscription "
-                "outcomes (yes/no)."
+                "Compare the average of every explicitly requested numeric "
+                "metric across subscription outcomes (yes/no)."
             ),
         }
 
