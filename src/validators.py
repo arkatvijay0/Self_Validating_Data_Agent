@@ -160,7 +160,26 @@ def validate_data_usage(
 # ============================================================
 
 def validate_result(result_value):
-    """Check whether an analysis result is usable and non-empty."""
+    """Check whether an analysis result is usable, supported, and non-empty."""
+
+    if isinstance(result_value, dict):
+        result_status = str(result_value.get("status", "")).strip().upper()
+        if result_status in {"UNSUPPORTED", "NOT_SUPPORTED"}:
+            return {
+                "pass": False,
+                "reason": (
+                    "Analysis result is unsupported: "
+                    + str(result_value.get("reason") or "No supported analysis rule matched.")
+                )[:500],
+            }
+        if result_status in {"FAIL", "ERROR", "FAILED"}:
+            return {
+                "pass": False,
+                "reason": (
+                    "Analysis result reports failure: "
+                    + str(result_value.get("reason") or result_status)
+                )[:500],
+            }
 
     if result_value is None:
         return {

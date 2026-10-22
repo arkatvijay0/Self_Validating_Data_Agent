@@ -95,6 +95,17 @@ def validate_result_presence(result):
             "reason": "Result is None."
         }
 
+    if isinstance(result, dict):
+        status = str(result.get("status", "")).strip().upper()
+        if status in {"UNSUPPORTED", "NOT_SUPPORTED", "FAIL", "FAILED", "ERROR"}:
+            return {
+                "pass": False,
+                "reason": (
+                    "Result is not a successful supported analysis: "
+                    + str(result.get("reason") or status)
+                )[:500],
+            }
+
     return {
         "pass": True,
         "reason": None
@@ -872,6 +883,101 @@ def validate_correlation_insight(
 
 
 # ==========================================================
+# GROUPED NUMERIC COMPARISON CLAIM VALIDATION
+# ==========================================================
+
+def validate_grouped_mean_direction_claims(insight, result, user_question=None):
+    """
+    Validate explicit higher/lower claims against actual grouped means.
+    Supports grouped_mean_analysis and multi_metric_grouped_mean_analysis
+    result structures with yes/no subscription groups.
+    """
+    if not isinstance(result, dict):
+        return {"pass": False, "reason": "Grouped result is not a dictionary.", "checks": []}
+
+    def numeric(value):
+        try:
+            value = float(value)
+            return value if value == value and abs(value) != float("inf") else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    metric_results = result.get("metric_results")
+    if isinstance(metric_results, dict) and metric_results:
+        candidates = [(str(metric), item) for metric, item in metric_results.items()]
+    else:
+        candidates = [(str(result.get("metric_column", "")), result)]
+
+    texts = []
+    if user_question and str(user_question).strip():
+        texts.append(("user_question", str(user_question).lower()))
+    if insight and str(insight).strip():
+        texts.append(("insight", str(insight).lower()))
+
+    checks = []
+    for metric, item in candidates:
+        if not isinstance(item, dict):
+            continue
+        groups = item.get("group_results")
+        if not isinstance(groups, dict):
+            continue
+        no_group = groups.get("no", {})
+        yes_group = groups.get("yes", {})
+        if not isinstance(no_group, dict) or not isinstance(yes_group, dict):
+            continue
+        no_mean = numeric(no_group.get("mean_value", no_group.get("mean")))
+        yes_mean = numeric(yes_group.get("mean_value", yes_group.get("mean")))
+        if no_mean is None or yes_mean is None:
+            checks.append({
+                "metric": metric, "pass": False,
+                "reason": "Both subscriber and non-subscriber means must be finite numbers.",
+            })
+            continue
+
+        # A comparison is checked only when the text explicitly states
+        # a direction about subscribers versus non-subscribers.
+        for source_name, text in texts:
+            mentions_subscribers = any(term in text for term in ("subscriber", "subscribers", "subscription"))
+            mentions_non_subscribers = any(term in text for term in ("non-subscriber", "non subscriber", "non-subscribers", "non subscribers"))
+            has_comparison = any(term in text for term in ("lower", "higher", "less than", "greater than", "more than", "less", "greater", "exceed", "exceeds"))
+            if not (mentions_subscribers and has_comparison):
+                continue
+
+            lower_claim = any(term in text for term in ("lower", "less than", "less", "below"))
+            higher_claim = any(term in text for term in ("higher", "greater than", "greater", "more than", "exceed", "exceeds", "above"))
+            if lower_claim == higher_claim:
+                continue
+
+            expected_direction = "lower" if yes_mean < no_mean else "higher" if yes_mean > no_mean else "equal"
+            claim_pass = (
+                (lower_claim and yes_mean < no_mean)
+                or (higher_claim and yes_mean > no_mean)
+            )
+            checks.append({
+                "source": source_name,
+                "metric": metric,
+                "claimed_direction": "lower" if lower_claim else "higher",
+                "actual_direction": expected_direction,
+                "subscriber_mean": yes_mean,
+                "non_subscriber_mean": no_mean,
+                "pass": bool(claim_pass),
+                "reason": None if claim_pass else (
+                    f"The claim says subscribers are "
+                    f"{'lower' if lower_claim else 'higher'}, but the calculated means are "
+                    f"subscribers={yes_mean:.2f}, non-subscribers={no_mean:.2f}."
+                ),
+            })
+
+    failures = [item for item in checks if not item.get("pass", False)]
+    return {
+        "pass": not failures,
+        "overall": "PASS" if not failures else "FAIL",
+        "checks": checks,
+        "reason": "; ".join(item.get("reason", "") for item in failures) or None,
+    }
+
+
+# ==========================================================
 # GROUPED VALIDATION
 # ==========================================================
 
@@ -1550,6 +1656,43 @@ def validate_insight(
         check_name = (
             "claim_level_validation"
         )
+
+    # ------------------------------------------------------
+    # GROUPED MEAN NUMERICAL DIRECTION CLAIMS
+    # ------------------------------------------------------
+
+    if (
+        "grouped_mean_analysis" in analysis
+        or "grouped_mean_analysis" in task_type
+        or (
+            isinstance(result, dict)
+            and result.get("analysis_type") in {
+                "grouped_mean_analysis",
+                "multi_metric_grouped_mean_analysis",
+            }
+        )
+    ):
+        task_validation = validate_grouped_mean_direction_claims(
+            insight=insight,
+            result=result,
+            user_question=user_question,
+        )
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "grouped_mean_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
 
     # ------------------------------------------------------
     # GROUPED BALANCE CONVERSION RATE

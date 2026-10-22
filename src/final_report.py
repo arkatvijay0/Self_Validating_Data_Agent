@@ -573,6 +573,15 @@ def create_final_report(
 
     overall_reliability = "PASS"
 
+    # A successful-looking insight/evidence wrapper must never override an
+    # unsupported or explicitly failed primary analysis result.
+    primary_result_status = ""
+    if isinstance(validated_result, dict):
+        primary_result_status = str(validated_result.get("status", "")).strip().upper()
+
+    if primary_result_status in {"UNSUPPORTED", "NOT_SUPPORTED", "FAIL", "FAILED", "ERROR"}:
+        overall_reliability = "FAIL"
+
     if insight_status != "PASS":
 
         overall_reliability = "FAIL"
