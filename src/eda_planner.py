@@ -58,7 +58,9 @@ def generate_plan_mock(task_type, data_profile, user_query):
     }
     requested_factors = []
     for alias, column in sorted(bank_aliases.items(), key=lambda item: len(item[0]), reverse=True):
-        if column in columns and re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", query):
+        # Accept plural wording such as "personal loans" for the "loan" column.
+        alias_pattern = r"(?<![\w])" + re.escape(alias) + r"s?(?![\w])"
+        if column in columns and re.search(alias_pattern, query):
             if column not in requested_factors:
                 requested_factors.append(column)
     for column in columns:
@@ -149,6 +151,38 @@ def generate_plan_mock(task_type, data_profile, user_query):
         return [
             f"Filter rows where the 'month' column equals '{month_code}', then calculate the mean of numeric 'duration' values and report the filtered row count and valid duration count."
         ]
+
+    # Generic grouped mean comparison for any explicitly named categorical column.
+    generic_grouped_mean = (
+        any(term in query.split() for term in ("average", "mean", "avg"))
+        and any(
+            phrase in query
+            for phrase in (
+                "compare", "comparison", "by ", "across", "between",
+                "separately", "grouped by", "with and without",
+                "with versus without", " versus ", " vs ",
+            )
+        )
+    )
+    if generic_grouped_mean:
+        matched_metrics = [
+            col for col in requested_factors
+            if col in columns
+            and data_profile.get("columns", {}).get(col, {}).get("role") == "continuous"
+        ]
+        matched_groups = [
+            col for col in requested_factors
+            if col in columns
+            and data_profile.get("columns", {}).get(col, {}).get("role") == "categorical"
+        ]
+        if matched_metrics and matched_groups:
+            metric_column = matched_metrics[0]
+            group_column = matched_groups[0]
+            return [
+                f"Group the source data by '{group_column}' and calculate the mean of '{metric_column}' within each group.",
+                f"Report the group size, valid numeric count, mean for each '{group_column}' category, and the difference between the requested groups where applicable.",
+                f"Independently recompute the grouped means from the uploaded source data. Do not substitute the overall mean for this grouped comparison.",
+            ]
 
     # GROUPED MEAN: compare the explicitly requested numeric metric by subscription outcome.
     grouped_mean_comparison = (

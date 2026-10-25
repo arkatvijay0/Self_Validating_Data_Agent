@@ -114,7 +114,10 @@ def analyze_task_mock(user_query, data_profile):
 
     # Safe, dataset-aware aliases.
     for alias, column in sorted(COLUMN_ALIASES.items(), key=lambda item: len(item[0]), reverse=True):
-        if column in columns and _contains_term(query, alias) and column not in query_column_matches:
+        # Accept common plural forms in natural-language questions, e.g.
+        # "personal loans" for the dataset column "loan".
+        alias_matches = _contains_term(query, alias) or _contains_term(query, alias + "s")
+        if column in columns and alias_matches and column not in query_column_matches:
             query_column_matches.append(column)
 
     # BANK_CONVERSION_ROUTING_FIX_V1
@@ -192,6 +195,52 @@ def analyze_task_mock(user_query, data_profile):
             "notes": "Filtered mean request: filter rows to the named month before calculating the average.",
         }
 
+
+    # Generic grouped-mean comparisons: support categorical groups beyond subscription.
+    # Example: "Compare average balance for customers with and without housing loans."
+    generic_grouped_mean_intent = (
+        has_mean_intent
+        and any(
+            _contains_term(query, term)
+            for term in (
+                "compare", "comparison", "by", "across", "between",
+                "separately", "grouped by", "with and without",
+                "with versus without", "versus", "vs",
+            )
+        )
+    )
+    if generic_grouped_mean_intent:
+        categorical_matches = [
+            column for column in query_column_matches
+            if column in profile_columns
+            and profile_columns.get(column, {}).get("role") == "categorical"
+        ]
+        numeric_matches = [
+            column for column in query_column_matches
+            if column in profile_columns
+            and profile_columns.get(column, {}).get("role") == "continuous"
+        ]
+        if categorical_matches and numeric_matches:
+            group_column = categorical_matches[0]
+            requested_metrics = list(dict.fromkeys(numeric_matches))
+            metric_column = requested_metrics[0]
+            return {
+                "task_type": "comparison",
+                "target_columns": requested_metrics + [group_column],
+                "metric_column": metric_column,
+                "requested_metric_columns": requested_metrics,
+                "group_column": group_column,
+                "comparison_metric": "mean",
+                "requested_metric": metric_column,
+                "unsupported_metric": False,
+                "analysis_intent": "grouped_mean_comparison",
+                "notes": (
+                    "Compare the explicitly requested numeric metric across the "
+                    "explicitly named categorical groups. Report each group count, "
+                    "valid numeric count, mean, and difference. Do not substitute "
+                    "an overall mean for the requested grouped comparison."
+                ),
+            }
 
     # Classify grouped mean comparisons before generic mean analysis.
     # Preserve the numeric metric explicitly requested by the user.
