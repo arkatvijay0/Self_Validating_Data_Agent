@@ -1354,6 +1354,24 @@ def map_insight_to_evidence(
                         {f"{prefix} loan", f"{prefix} loans",
                          f"{prefix} personal loan", f"{prefix} personal loans"}
                     )
+
+                # In common bank-marketing datasets, the binary "y" column
+                # indicates whether a customer subscribed. Accept those
+                # natural-language group labels without assuming this for
+                # unrelated grouping columns.
+                if column == "y":
+                    if positive:
+                        aliases.update({
+                            "subscriber", "subscribers", "subscribed",
+                            "subscribed customers", "customers who subscribed",
+                        })
+                    else:
+                        aliases.update({
+                            "non subscriber", "non subscribers",
+                            "non-subscriber", "non-subscribers",
+                            "not subscribed", "non-subscribed customers",
+                            "customers who did not subscribe",
+                        })
             return {alias for alias in aliases if alias}
 
         def group_is_described(label):
@@ -1370,6 +1388,7 @@ def map_insight_to_evidence(
                 and any(_close_enough(number, item[2]) for number in numbers)
             )
 
+        group_check_statuses = {}
         for check_name, item in (
             ("first_group_mean_mentioned", first_item),
             ("second_group_mean_mentioned", second_item),
@@ -1379,12 +1398,38 @@ def map_insight_to_evidence(
                 and mean_is_mentioned(item)
                 and group_is_described(item[0])
             )
+            status = "PASS" if passed else "FAIL"
+            group_check_statuses[check_name] = status
             checks.append({
                 "check": check_name,
                 "group_label": item[0] if item is not None else None,
                 "expected_mean": item[2] if item is not None else None,
-                "status": "PASS" if passed else "FAIL",
+                "status": status,
             })
+
+        # Backward-compatible check names used by earlier tests and callers.
+        # Keep generic checks above for arbitrary binary grouped-mean tasks.
+        if (
+            " ".join(str(grouping_column or "").strip().lower().split()) == "y"
+            and first_item is not None
+            and second_item is not None
+            and first_item[0].strip().lower() in ("no", "false", "0")
+            and second_item[0].strip().lower() in ("yes", "true", "1")
+        ):
+            checks.extend([
+                {
+                    "check": "non_subscriber_mean_mentioned",
+                    "group_label": first_item[0],
+                    "expected_mean": first_item[2],
+                    "status": group_check_statuses["first_group_mean_mentioned"],
+                },
+                {
+                    "check": "subscriber_mean_mentioned",
+                    "group_label": second_item[0],
+                    "expected_mean": second_item[2],
+                    "status": group_check_statuses["second_group_mean_mentioned"],
+                },
+            ])
 
         difference = source.get("mean_difference_yes_minus_no")
         if difference is None:
