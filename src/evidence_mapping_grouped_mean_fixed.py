@@ -1223,9 +1223,8 @@ def map_insight_to_evidence(
     # --------------------------------------------------------
     # GROUPED MEAN ANALYSIS
     # --------------------------------------------------------
-    # Validates comparison insights using group means and the observed
-    # difference. This is deliberately separate from grouped_analysis,
-    # which validates category rankings rather than numeric means.
+    # Validate the actual groups and metric in the evidence. Do not
+    # assume that every binary comparison is about subscriptions.
     def find_grouped_mean_result(obj, depth=0):
         if depth > 7 or not isinstance(obj, dict):
             return None
@@ -1247,30 +1246,64 @@ def map_insight_to_evidence(
     if analysis_type == "grouped_mean_analysis" or grouped_mean_result is not None:
         source = grouped_mean_result if grouped_mean_result is not None else evidence
         groups = source.get("group_results", {})
-        # Bank-marketing subscription comparison: no = non-subscribers,
-        # yes = subscribers. Accept common casing in group labels.
-        no_group = next((v for k, v in groups.items() if str(k).strip().lower() in ("no", "not subscribed", "non-subscribers", "non_subscribers")), None)
-        yes_group = next((v for k, v in groups.items() if str(k).strip().lower() in ("yes", "subscribed", "subscribers")), None)
+        if not isinstance(groups, dict):
+            groups = {}
 
         def get_group_mean(group):
             if not isinstance(group, dict):
                 return None
-            for key in ("mean_value", "mean", "average", "mean_balance", "mean_age"):
+            for key in (
+                "mean_value", "mean", "average", "mean_balance",
+                "mean_age", "mean_metric"
+            ):
                 if group.get(key) is not None:
                     return _parse_claim_number(group.get(key))
             return None
 
-        no_mean = get_group_mean(no_group)
-        yes_mean = get_group_mean(yes_group)
-        difference = source.get("mean_difference_yes_minus_no")
-        if difference is None and no_mean is not None and yes_mean is not None:
-            difference = yes_mean - no_mean
-        difference = _parse_claim_number(difference)
+        # Keep the source's group order. The reported difference is explicitly
+        # yes-minus-no when those binary labels exist; otherwise derive it
+        # from the first two groups in the evidence.
+        group_items = list(groups.items())
+        group_details = [
+            (str(label), group, get_group_mean(group))
+            for label, group in group_items
+        ]
+        group_details = [item for item in group_details if item[2] is not None]
+
+        no_item = next(
+            (item for item in group_details
+             if item[0].strip().lower() in ("no", "false", "0")),
+            None,
+        )
+        yes_item = next(
+            (item for item in group_details
+             if item[0].strip().lower() in ("yes", "true", "1")),
+            None,
+        )
+        if no_item is not None and yes_item is not None:
+            first_item, second_item = no_item, yes_item
+        elif len(group_details) >= 2:
+            first_item, second_item = group_details[0], group_details[1]
+        else:
+            first_item = group_details[0] if group_details else None
+            second_item = None
+
+        metric = source.get("metric_column", source.get("metric"))
+        grouping_column = (
+            source.get("group_column")
+            or source.get("grouping_column")
+            or source.get("category_column")
+            or source.get("group_by")
+        )
+        metric_text = " ".join(
+            str(metric or "").replace("_", " ").lower().split()
+        )
         insight_text = str(insight or "")
-        insight_lower = insight_text.lower()
+        insight_lower = " ".join(
+            insight_text.lower().replace("_", " ").split()
+        )
         checks = []
-        metric = source.get("metric_column")
-        metric_text = " ".join(str(metric or "").replace("_", " ").lower().split())
+
         metric_pattern = (
             r"(?<![\w])" + re.escape(metric_text) + r"(?![\w])"
             if metric_text else None
@@ -1282,36 +1315,92 @@ def map_insight_to_evidence(
             "check": "requested_metric_mentioned",
             "status": "PASS" if metric_mentioned else "FAIL",
         })
-        groups_available = no_mean is not None and yes_mean is not None
+        groups_available = (
+            first_item is not None and second_item is not None
+        )
         checks.append({
             "check": "both_group_means_available",
             "status": "PASS" if groups_available else "FAIL",
         })
-        no_mean_mentioned = groups_available and _close_enough(
-            next((n for n in (_parse_claim_number(m.group(0)) for m in re.finditer(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?", insight_text)) if _close_enough(n, no_mean)), None), no_mean
+
+        number_tokens = re.findall(
+            r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?", insight_text
         )
-        yes_mean_mentioned = groups_available and _close_enough(
-            next((n for n in (_parse_claim_number(m.group(0)) for m in re.finditer(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?", insight_text)) if _close_enough(n, yes_mean)), None), yes_mean
-        )
-        # Require both numeric values and recognizable group descriptions.
-        checks.append({
-            "check": "non_subscriber_mean_mentioned",
-            "status": "PASS" if no_mean_mentioned and ("non-subscrib" in insight_lower or "not subscribed" in insight_lower) else "FAIL",
-        })
-        checks.append({
-            "check": "subscriber_mean_mentioned",
-            "status": "PASS" if yes_mean_mentioned and "subscrib" in insight_lower else "FAIL",
-        })
+        numbers = [
+            parsed for token in number_tokens
+            if (parsed := _parse_claim_number(token)) is not None
+        ]
+
+        def label_aliases(label):
+            normalized = " ".join(
+                str(label).strip().lower().replace("_", " ").split()
+            )
+            aliases = {normalized} if normalized else set()
+            column = " ".join(
+                str(grouping_column or "").strip().lower()
+                .replace("_", " ").split()
+            )
+            if normalized in ("yes", "true", "1", "no", "false", "0") and column:
+                positive = normalized in ("yes", "true", "1")
+                prefix = "with" if positive else "without"
+                aliases.add(f"{prefix} {column}")
+                # Common natural-language form for housing-loan datasets.
+                if column in ("housing", "housing loan", "housing loans"):
+                    aliases.update(
+                        {f"{prefix} housing loan", f"{prefix} housing loans"}
+                    )
+                if column in ("loan", "loans", "personal loan", "personal loans"):
+                    aliases.update(
+                        {f"{prefix} loan", f"{prefix} loans",
+                         f"{prefix} personal loan", f"{prefix} personal loans"}
+                    )
+            return {alias for alias in aliases if alias}
+
+        def group_is_described(label):
+            aliases = label_aliases(label)
+            return any(
+                re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])",
+                          insight_lower)
+                for alias in aliases
+            )
+
+        def mean_is_mentioned(item):
+            return bool(
+                item is not None
+                and any(_close_enough(number, item[2]) for number in numbers)
+            )
+
+        for check_name, item in (
+            ("first_group_mean_mentioned", first_item),
+            ("second_group_mean_mentioned", second_item),
+        ):
+            passed = (
+                groups_available
+                and mean_is_mentioned(item)
+                and group_is_described(item[0])
+            )
+            checks.append({
+                "check": check_name,
+                "group_label": item[0] if item is not None else None,
+                "expected_mean": item[2] if item is not None else None,
+                "status": "PASS" if passed else "FAIL",
+            })
+
+        difference = source.get("mean_difference_yes_minus_no")
+        if difference is None:
+            difference = source.get("mean_difference")
+        if difference is None and first_item is not None and second_item is not None:
+            difference = second_item[2] - first_item[2]
+        difference = _parse_claim_number(difference)
         if difference is not None:
-            numbers = [
-                _parse_claim_number(m.group(0))
-                for m in re.finditer(r"(?<![A-Za-z])[-+]?\d[\d,]*(?:\.\d+)?", insight_text)
-            ]
-            diff_mentioned = any(_close_enough(n, difference) for n in numbers if n is not None)
+            diff_mentioned = any(
+                _close_enough(number, difference) for number in numbers
+            )
             checks.append({
                 "check": "mean_difference_mentioned",
                 "status": "PASS" if diff_mentioned else "FAIL",
             })
+
         failed_checks = [item for item in checks if item["status"] != "PASS"]
         return {
             "status": "PASS" if checks and not failed_checks else "FAIL",
@@ -1319,10 +1408,14 @@ def map_insight_to_evidence(
             "insight": insight,
             "group_results": groups,
             "metric_column": metric,
+            "grouping_column": grouping_column,
             "mean_difference_yes_minus_no": difference,
             "checks": checks,
             "evidence_summary": create_evidence_summary(evidence),
-            "reason": None if not failed_checks else "The grouped-mean insight does not match the validated group means and difference.",
+            "reason": None if not failed_checks else (
+                "The grouped-mean insight does not match the validated group means, "
+                "group descriptions, metric, or difference."
+            ),
         }
 
     # --------------------------------------------------------
