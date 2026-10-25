@@ -1540,6 +1540,36 @@ def create_evidence(
     }
 
 
+def _describe_binary_group(group_column, group_value):
+    """Describe yes/no groups using the actual grouping column, not unrelated labels."""
+    column = str(group_column or "").strip().lower().replace("_", " ")
+    value = str(group_value or "").strip().lower()
+
+    labels = {
+        "housing": {
+            "yes": "customers with housing loans",
+            "no": "customers without housing loans",
+        },
+        "loan": {
+            "yes": "customers with personal loans",
+            "no": "customers without personal loans",
+        },
+        "y": {
+            "yes": "customers who subscribed",
+            "no": "customers who did not subscribe",
+        },
+        "conversion": {
+            "yes": "converted customers",
+            "no": "non-converted customers",
+            "1": "converted customers",
+            "0": "non-converted customers",
+        },
+    }
+    if value in labels.get(column, {}):
+        return labels[column][value]
+    return f"customers in the {column or 'requested'} = {value or 'unknown'} group"
+
+
 # =========================================================
 # INSIGHT GENERATION
 # =========================================================
@@ -1578,6 +1608,8 @@ def generate_pipeline_insight(
         yes_group = groups.get("yes", {}) if isinstance(groups, dict) else {}
         no_mean = no_group.get("mean_value", no_group.get("mean"))
         yes_mean = yes_group.get("mean_value", yes_group.get("mean"))
+        no_count = no_group.get("row_count", 0)
+        yes_count = yes_group.get("row_count", 0)
         difference = primary_result.get("mean_difference_yes_minus_no")
         metric_value = primary_result.get("metric_column")
         metric = str(metric_value).strip() if metric_value is not None else ""
@@ -1596,17 +1628,26 @@ def generate_pipeline_insight(
             and np.isfinite(float(value))
             for value in numeric_values
         ):
+            group_column = primary_result.get("group_column", "")
+            no_label = _describe_binary_group(group_column, "no")
+            yes_label = _describe_binary_group(group_column, "yes")
             direction = "higher" if float(difference) > 0 else (
-                "lower" if float(difference) < 0 else "the same as"
+                "lower" if float(difference) < 0 else "the same"
             )
             difference_magnitude = abs(float(difference))
+            if float(difference) == 0:
+                comparison = f"The averages for the two groups are equal."
+            else:
+                comparison = (
+                    f"The average for {yes_label} is {difference_magnitude:,.2f} "
+                    f"{direction} than the average for {no_label}."
+                )
             return (
-                f"Average {metric} was {float(no_mean):,.2f} for non-subscribers "
-                f"and {float(yes_mean):,.2f} for subscribers. "
-                f"The subscriber group average was {difference_magnitude:,.2f} "
-                f"{direction} than the non-subscriber average "
-                f"(yes minus no = {float(difference):,.2f}). "
-                "The comparison is descriptive and does not establish causation."
+                f"Average {metric} was {float(no_mean):,.2f} for {no_label} "
+                f"and {float(yes_mean):,.2f} for {yes_label}. "
+                f"{comparison} (yes minus no = {float(difference):,.2f}; "
+                f"counts: {no_label}: {no_count:,}, {yes_label}: {yes_count:,}). "
+                "This is a descriptive comparison and does not establish causation."
             )
         return (
             f"The grouped average comparison for {metric} could not be summarized "
@@ -1778,25 +1819,24 @@ def generate_pipeline_recommendation(
         else:
             direction = "the same"
 
+        group_column = primary_result.get("group_column", "")
+        no_label = _describe_binary_group(group_column, "no")
+        yes_label = _describe_binary_group(group_column, "yes")
+
         if difference == 0:
-            comparison = (
-                f"both groups have the same average {metric_label} "
-                f"({yes_mean:.2f})"
-            )
+            comparison = f"both groups have the same average {metric_label} ({yes_mean:.2f})"
         else:
             comparison = (
-                f"the subscriber group's average {metric_label} is "
-                f"{direction} by approximately {abs(difference):.2f}"
+                f"the average for {yes_label} is {direction} by approximately "
+                f"{abs(difference):.2f} compared with {no_label}"
             )
 
         return (
-            f"The non-subscriber group's average {metric_label} is "
-            f"{no_mean:.2f}, and the subscriber group's average is "
-            f"{yes_mean:.2f}; {comparison}. Investigate whether this "
-            "difference is associated with other customer characteristics. "
-            "Check group sizes and data quality before making targeting "
-            "decisions. This descriptive comparison does not establish "
-            "causation."
+            f"The average {metric_label} for {no_label} is {no_mean:.2f}, "
+            f"and for {yes_label} it is {yes_mean:.2f}; {comparison}. "
+            "Investigate whether this difference is associated with other customer "
+            "characteristics. Check group sizes and data quality before making "
+            "decisions. This descriptive comparison does not establish causation."
         )
 
         groups = primary_result.get("group_results", {})
@@ -2183,10 +2223,23 @@ def main(dataset_path=None, user_question=None, test_fault=False):
     # GROUPED SERIES
     # =====================================================
 
-    grouped_series = build_grouped_series(
-        execution_results,
-        DATA_PATH
+    # A validated grouped-mean comparison already carries its own group-level
+    # evidence. Do not run the legacy Region -> Total Profit reconstruction for it.
+    primary_analysis_type = (
+        str(primary_result.get("analysis_type", "")).lower()
+        if isinstance(primary_result, dict)
+        else ""
     )
+    if primary_analysis_type in {
+        "grouped_mean_analysis",
+        "multi_metric_grouped_mean_analysis",
+    }:
+        grouped_series = None
+    else:
+        grouped_series = build_grouped_series(
+            execution_results,
+            DATA_PATH
+        )
 
     # Calculate grouped conversion rates for explicitly requested factors.
     question_lower = str(user_question or "").lower()
@@ -2300,20 +2353,28 @@ def main(dataset_path=None, user_question=None, test_fault=False):
                     "grouped_counts": safe_json_value(counts),
                 }
 
-    print(
-        "\nGrouped Series Used for Insight:"
-    )
+    print("\nGrouped Series Used for Insight:")
 
     if grouped_series is not None:
+        print(grouped_series)
 
+    elif (
+        isinstance(primary_result, dict)
+        and str(primary_result.get("analysis_type", "")).lower()
+        in {
+            "grouped_mean_analysis",
+            "multi_metric_grouped_mean_analysis",
+        }
+        and primary_result.get("status") == "PASS"
+    ):
         print(
-            grouped_series
+            "Not required: validated grouped results are available "
+            "directly in primary_result."
         )
 
     else:
-
         print(
-            "Could not reconstruct grouped series."
+            "Grouped series is unavailable for this analysis."
         )
 
     # =====================================================
