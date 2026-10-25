@@ -1002,23 +1002,25 @@ def validate_grouped_mean_direction_claims(insight, result, user_question=None):
         else "NOT_ASSESSED"
     )
     return {
-        # Keep the legacy combined verdict for callers/tests that expect an
-        # unsupported user claim to make this validation fail, while exposing
-        # the generated insight's accuracy independently for validate_insight.
-        "pass": not insight_failures and not user_failures,
-        "overall": "PASS" if not insight_failures and not user_failures else "FAIL",
+        # The overall verdict reflects whether the generated insight is accurate.
+        # The user's claim is reported separately and may be NOT_SUPPORTED
+        # without making an accurate, evidence-grounded insight fail.
+        "pass": not insight_failures,
+        "overall": "PASS" if not insight_failures else "FAIL",
         "checks": insight_checks + user_checks,
         "insight_checks": insight_checks,
         "insight_pass": not insight_failures,
         "insight_overall": "PASS" if not insight_failures else "FAIL",
         "reason": "; ".join(
-            item.get("reason", "") for item in insight_failures + user_failures
+            item.get("reason", "") for item in insight_failures
         ) or None,
         "user_claim_validation": {
             "status": user_status,
             "pass": not user_failures if user_checks else None,
             "checks": user_checks,
-            "reason": "; ".join(item.get("reason", "") for item in user_failures) or None,
+            "reason": "; ".join(
+                item.get("reason", "") for item in user_failures
+            ) or None,
         },
     }
 
