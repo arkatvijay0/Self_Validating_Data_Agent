@@ -2518,6 +2518,106 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         print("\nInsight Validation Result (using independent evidence):")
         print_json(insight_validation)
 
+    # OPTIONAL OLLAMA INSIGHT REWRITING (validated candidate only)
+    # Preserve the deterministic insight and its validation as fallbacks.
+    original_insight = insight
+    original_insight_validation = insight_validation
+
+    try:
+        from ollama_insight_rewriter import rewrite_insight_with_ollama
+
+        candidate_insight = rewrite_insight_with_ollama(
+            user_question=user_question,
+            original_insight=original_insight,
+            verified_results=primary_result,
+            evidence=evidence,
+        )
+
+        if candidate_insight:
+            candidate_validation_result = (
+                evidence
+                if str(analysis_type).lower() == "descriptive_summary"
+                else validation_result_data
+            )
+
+            candidate_validation = validate_insight(
+                insight=candidate_insight,
+                result=candidate_validation_result,
+                analysis_type=analysis_type,
+                task_analysis=task_analysis,
+                user_question=user_question,
+                data_profile=data_profile,
+            )
+
+            if (
+                isinstance(primary_result, dict)
+                and str(primary_result.get("analysis_type", "")).lower()
+                == "multi_metric_grouped_mean_analysis"
+            ):
+                candidate_validation = (
+                    validate_multi_metric_grouped_mean_insight(
+                        insight=candidate_insight,
+                        combined_result=primary_result,
+                        base_validation=candidate_validation,
+                    )
+                )
+
+            # For grouped means, also require the candidate to map to
+            # the validated evidence before accepting an Ollama rewrite.
+            candidate_mapping_passed = True
+
+            if str(analysis_type).lower() == "grouped_mean_analysis":
+                candidate_mapping = map_insight_to_evidence(
+                    candidate_insight,
+                    evidence,
+                )
+                candidate_mapping_passed = (
+                    isinstance(candidate_mapping, dict)
+                    and candidate_mapping.get("status") == "PASS"
+                )
+
+                if not candidate_mapping_passed:
+                    print(
+                        "Ollama insight rewrite: candidate failed "
+                        "grouped-mean evidence mapping; retaining original."
+                    )
+
+            candidate_passed = (
+                isinstance(candidate_validation, dict)
+                and candidate_validation.get("overall") == "PASS"
+                and candidate_validation.get("pass") is True
+                and candidate_mapping_passed
+            )
+
+            if candidate_passed:
+                insight = candidate_insight
+                insight_validation = candidate_validation
+                print(
+                    "Ollama insight rewrite: ACCEPTED "
+                    "(existing validators passed)."
+                )
+            else:
+                insight = original_insight
+                insight_validation = original_insight_validation
+                print(
+                    "Ollama insight rewrite: REJECTED "
+                    "(validation failed); original insight retained."
+                )
+        else:
+            print(
+                "Ollama insight rewrite: SKIPPED; "
+                "original insight retained."
+            )
+
+    except Exception as exc:
+        insight = original_insight
+        insight_validation = original_insight_validation
+        print(
+            "Ollama insight rewrite: SKIPPED due to an error; "
+            "original insight retained. "
+            f"Details: {exc}"
+        )
+
     print(
         "Evidence:"
     )
