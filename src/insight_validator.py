@@ -1001,18 +1001,19 @@ def validate_grouped_mean_direction_claims(insight, result, user_question=None):
         else "SUPPORTED" if user_checks
         else "NOT_ASSESSED"
     )
+    # Preserve the helper's legacy combined verdict for direct callers and
+    # regression tests. The insight-only verdict is exposed separately so the
+    # top-level validator can distinguish a wrong user assumption from a bad insight.
+    combined_failures = insight_failures + user_failures
     return {
-        # The overall verdict reflects whether the generated insight is accurate.
-        # The user's claim is reported separately and may be NOT_SUPPORTED
-        # without making an accurate, evidence-grounded insight fail.
-        "pass": not insight_failures,
-        "overall": "PASS" if not insight_failures else "FAIL",
+        "pass": not combined_failures,
+        "overall": "PASS" if not combined_failures else "FAIL",
         "checks": insight_checks + user_checks,
         "insight_checks": insight_checks,
         "insight_pass": not insight_failures,
         "insight_overall": "PASS" if not insight_failures else "FAIL",
         "reason": "; ".join(
-            item.get("reason", "") for item in insight_failures
+            item.get("reason", "") for item in combined_failures
         ) or None,
         "user_claim_validation": {
             "status": user_status,
@@ -1225,6 +1226,16 @@ def validate_question_relevance(
     }
 
     for metric, pattern in metric_groups.items():
+        if metric == "customers":
+            # "customers" often identifies the population, not the requested metric.
+            # Require it in the answer only when the question asks for a customer count.
+            asks_customer_count = bool(re.search(
+                r"\\b(count|number|how many|total number|customer count|"
+                r"number of customers|count of customers)\\b",
+                question,
+            ))
+            if not asks_customer_count:
+                continue
         if re.search(pattern, question):
             found = bool(re.search(pattern, insight_text))
             checks[f"requested_metric_{metric}_addressed"] = found
@@ -1730,7 +1741,10 @@ def validate_insight(
         overall_pass = (
             presence["pass"]
             and result_check["pass"]
-            and task_validation.get("pass", False)
+            and task_validation.get(
+                "insight_pass",
+                task_validation.get("pass", False),
+            )
             and relevance_validation.get("pass", False)
         )
         return {

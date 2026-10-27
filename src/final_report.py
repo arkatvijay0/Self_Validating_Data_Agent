@@ -651,7 +651,9 @@ def create_final_report(
 
         overall_reliability = "FAIL"
 
-    if claim_failed or mapping_failed or user_claim_not_supported:
+    # An unsupported original user claim is reported separately. It should not
+    # invalidate an otherwise correct analysis and evidence-backed generated insight.
+    if claim_failed or mapping_failed:
         overall_reliability = "FAIL"
 
     report_lines.append(
@@ -661,8 +663,10 @@ def create_final_report(
     report_lines.append("")
 
     report_lines.append(
-        "Overall reliability is marked PASS when the insight, evidence, "
-        "recommendation, claim-level checks, and insight mapping pass. "
+        "Overall reliability is marked PASS when the generated insight, evidence, "
+        "recommendation, applicable claim-level checks, and insight mapping pass. "
+        "The user's original directional claim is reported separately and does not "
+        "by itself invalidate an otherwise correct analysis. "
         "Traceability REVIEW indicates missing explicit source references; "
         "it remains visible as a limitation but does not by itself invalidate "
         "a numerically validated result."

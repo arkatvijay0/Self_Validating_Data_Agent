@@ -1,3 +1,4 @@
+
 import math
 import re
 import pandas as pd
@@ -564,10 +565,7 @@ def generate_missing_values_insight(dataset_path):
         return f"Missing-value analysis could not be completed: {error}"
 
 
-# ============================================================
-# MAIN INSIGHT GENERATOR
-# ============================================================
-
+# CONVERSION FACTOR INSIGHT
 
 def generate_conversion_factor_insight(result):
     """Summarize validated conversion-factor results without causal claims."""
@@ -668,6 +666,11 @@ def generate_conversion_factor_insight(result):
     )
     return " ".join(sentences)
 
+
+# ============================================================
+# MAIN INSIGHT GENERATOR
+# ============================================================
+
 def generate_insight(user_question, result, task_analysis, dataset_path=None):
     """
     Generate a natural-language insight.
@@ -684,24 +687,6 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
         ).lower()
     else:
         task_type = str(task_analysis or "").lower()
-
-    # Dedicated route for validated conversion-factor analysis.
-    result_type = (
-        str(result.get("analysis_type", "")).lower()
-        if isinstance(result, dict) else ""
-    )
-    if (
-        result_type == "conversion_factor_analysis"
-        or task_type == "conversion_factor_analysis"
-        or (
-            "conversion" in question_lower
-            and any(term in question_lower for term in
-                    ("factor", "associated", "patterns", "influence"))
-            and isinstance(result, dict)
-            and isinstance(result.get("categorical_factor_results"), dict)
-        )
-    ):
-        return generate_conversion_factor_insight(result)
 
     # Answer data-quality questions directly from the source dataset.
     missing_value_terms = (
@@ -753,36 +738,6 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
             return generate_conversion_insight(dataset_path)
         return "Conversion analysis requires the dataset path to independently verify conversion and y values."
 
-            # Handle validated grouped-mean comparisons before generic mean logic.
-    if (
-        isinstance(result, dict)
-        and result.get("analysis_type") == "grouped_mean_analysis"
-    ):
-        group_results = result.get("group_results", {})
-
-        no_group = group_results.get("no", {})
-        yes_group = group_results.get("yes", {})
-
-        no_mean = safe_float(no_group.get("mean_value", no_group.get("mean")))
-        yes_mean = safe_float(yes_group.get("mean_value", yes_group.get("mean")))
-        difference = safe_float(result.get("mean_difference_yes_minus_no"))
-        metric = str(result.get("metric_column") or "requested metric")
-
-        if no_mean is not None and yes_mean is not None and difference is not None:
-            no_count = int(no_group.get("row_count", 0))
-            yes_count = int(yes_group.get("row_count", 0))
-            direction = "higher" if difference >= 0 else "lower"
-            return (
-                f"The average {metric} was {no_mean:,.2f} for non-subscribers "
-                f"and {yes_mean:,.2f} for subscribers. "
-                f"The subscriber group average was {abs(difference):,.2f} {direction} "
-                f"(non-subscribers: {no_count:,}; subscribers: {yes_count:,})."
-            )
-
-        return (
-            f"The grouped average {metric} comparison could not be generated "
-            "because one or more validated group means were missing."
-        )
     # Handle specific mean/average questions before the generic dataset summary.
     mean_terms = ("average", "avg", "mean")
     is_mean_question = any(re.search(r"\b" + re.escape(term) + r"\b", question_lower) for term in mean_terms)
@@ -850,19 +805,8 @@ def generate_insight(user_question, result, task_analysis, dataset_path=None):
                     f"across {filtered_rows:,} rows matching that month."
                 )
 
-            metric_name = str(requested_column).replace("_", " ").strip()
-            metric_label = (
-                f"customer {metric_name}"
-                if metric_name.lower() == "balance"
-                and any(
-                    term in question_lower
-                    for term in ("customer", "customers", "client", "clients")
-                )
-                else metric_name
-            )
-
             return (
-                f"The average {metric_label} is {values.mean():,.2f}, "
+                f"The average {str(requested_column).replace('_', ' ')} is {values.mean():,.2f}, "
                 f"based on {len(values):,} valid numeric observations."
             )
 

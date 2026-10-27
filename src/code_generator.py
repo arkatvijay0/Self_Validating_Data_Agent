@@ -66,7 +66,8 @@ def generate_code_mock(
     step_text,
     filepath,
     data_profile=None,
-    feedback=None
+    feedback=None,
+    target_columns=None
 ):
     """
     Generate executable Python code for an EDA plan step.
@@ -1097,6 +1098,221 @@ result = pd.DataFrame({
 
         return code
 
+
+
+    # ========================================================
+    # GENERAL GROUPED MEAN / AVERAGE
+    # Must run before subscription-specific and scalar-mean rules.
+    # ========================================================
+    grouped_mean_cues = (
+        "compare", "comparison", "across", "between", "group",
+        "grouped", "group means", "separately", "with and without",
+        "for each", "by ",
+    )
+    asks_for_mean = any(
+        word in step_lower.split() for word in ("mean", "average", "avg")
+    )
+    asks_for_grouping = any(cue in step_lower for cue in grouped_mean_cues)
+
+    if asks_for_mean and asks_for_grouping:
+        try:
+            available_columns = pd.read_csv(filepath, nrows=0).columns.tolist()
+        except Exception:
+            available_columns = []
+
+        def _column_words(value):
+            return re.findall(r"[a-z0-9]+", str(value).lower())
+
+        prompt_words = _column_words(step_text)
+        matched_columns = []
+        for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+            column_words = _column_words(column)
+            width = len(column_words)
+            if width and any(
+                prompt_words[index:index + width] == column_words
+                for index in range(len(prompt_words) - width + 1)
+            ):
+                matched_columns.append(column)
+
+        profile_columns = (data_profile or {}).get("columns", {})
+        numeric_matched = [
+            column for column in matched_columns
+            if isinstance(profile_columns.get(column), dict)
+            and any(
+                token in str(profile_columns[column].get("dtype", "")).lower()
+                for token in ("int", "float", "numeric")
+            )
+        ]
+        metric_column = numeric_matched[0] if numeric_matched else None
+
+        if metric_column is None:
+            try:
+                sample_df = pd.read_csv(filepath, nrows=100)
+                numeric_matched = [
+                    column for column in matched_columns
+                    if column in sample_df.columns
+                    and pd.to_numeric(sample_df[column], errors="coerce").notna().sum() > 0
+                    and (
+                        pd.api.types.is_numeric_dtype(sample_df[column])
+                        or pd.to_numeric(sample_df[column], errors="coerce").notna().mean() >= 0.8
+                    )
+                ]
+                metric_column = numeric_matched[0] if numeric_matched else None
+            except Exception:
+                metric_column = None
+
+        # The pipeline may provide task-analyzed target columns. When a plan
+        # step describes reporting means for each group but omits the metric
+        # name, use a single numeric target column other than the group field.
+        # Never guess when there are zero or multiple candidates.
+        if metric_column is None and isinstance(target_columns, (list, tuple)):
+            try:
+                sample_df = pd.read_csv(filepath, nrows=100)
+                target_numeric_candidates = [
+                    column for column in target_columns
+                    if column in sample_df.columns
+                    and pd.to_numeric(sample_df[column], errors="coerce").notna().sum() > 0
+                    and (
+                        pd.api.types.is_numeric_dtype(sample_df[column])
+                        or pd.to_numeric(sample_df[column], errors="coerce").notna().mean() >= 0.8
+                    )
+                ]
+                if len(target_numeric_candidates) == 1:
+                    metric_column = target_numeric_candidates[0]
+            except Exception:
+                metric_column = None
+
+        group_column = None
+        group_patterns = (
+            r"\bby\s+['\"]?([^'\".,;]+?)['\"]?(?:\s+and\s+|\s+calculate\b|\s+compare\b|\s*$)",
+            r"\bfor\s+each\s+['\"]?([^'\".,;]+?)['\"]?\s+categor",
+            r"\bgroup(?:ed)?\s+(?:the\s+data\s+)?by\s+['\"]?([^'\".,;]+?)['\"]?(?:\s+and\s+|\s*$)",
+            r"\bwith\s+and\s+without\s+([a-z0-9 _-]+)",
+        )
+        requested_group_phrase = None
+        for pattern in group_patterns:
+            match = re.search(pattern, str(step_text), flags=re.IGNORECASE)
+            if match:
+                requested_group_phrase = match.group(1).strip()
+                break
+
+        if requested_group_phrase:
+            group_words = _column_words(requested_group_phrase)
+            for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+                column_words = _column_words(column)
+                if column_words and (
+                    column.lower() == requested_group_phrase.lower()
+                    or column_words == group_words
+                    or any(
+                        group_words[index:index + len(column_words)] == column_words
+                        for index in range(max(0, len(group_words) - len(column_words) + 1))
+                    )
+                ):
+                    if column != metric_column:
+                        group_column = column
+                        break
+
+        if group_column is None:
+            non_metric_matches = [column for column in matched_columns if column != metric_column]
+            if len(non_metric_matches) == 1:
+                group_column = non_metric_matches[0]
+
+        # Independent-recomputation plan steps may say "recompute the
+        # grouped means" without repeating either column name. In that case,
+        # use the task analyzer's target columns only when they identify one
+        # unambiguous non-metric grouping column.
+        if (
+            group_column is None
+            and metric_column is not None
+            and isinstance(target_columns, (list, tuple))
+        ):
+            target_group_candidates = [
+                column for column in target_columns
+                if column in available_columns and column != metric_column
+            ]
+            if len(target_group_candidates) == 1:
+                group_column = target_group_candidates[0]
+
+        if metric_column is not None and group_column is not None:
+            code += f'''
+metric_column = {metric_column!r}
+group_column = {group_column!r}
+required_columns = [metric_column, group_column]
+missing_columns = [column for column in required_columns if column not in df.columns]
+
+if missing_columns:
+    result = {{
+        "status": "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": metric_column,
+        "group_column": group_column,
+        "reason": "Required columns missing: " + ", ".join(missing_columns),
+    }}
+else:
+    metric_values = pd.to_numeric(df[metric_column], errors="coerce")
+    group_values = df[group_column].astype("string").str.strip()
+    normalized_groups = group_values.fillna("Missing")
+    normalized_groups = normalized_groups.mask(normalized_groups == "", "Missing")
+    working = pd.DataFrame({{
+        "_group": normalized_groups,
+        "_metric": metric_values,
+    }})
+    grouped = working.groupby("_group", dropna=False).agg(
+        row_count=("_group", "size"),
+        valid_value_count=("_metric", "count"),
+        mean_value=("_metric", "mean"),
+    )
+    group_results = {{
+        str(group): {{
+            "row_count": int(row["row_count"]),
+            "valid_value_count": int(row["valid_value_count"]),
+            "mean_value": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+            "mean": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+        }}
+        for group, row in grouped.iterrows()
+    }}
+    valid_group_means = {{
+        group: values["mean_value"]
+        for group, values in group_results.items()
+        if values["mean_value"] is not None
+    }}
+    mean_difference = None
+    if len(valid_group_means) == 2:
+        group_names = list(valid_group_means)
+        mean_difference = float(valid_group_means[group_names[0]] - valid_group_means[group_names[1]])
+    mean_difference_yes_minus_no = None
+    normalized_group_names = {{str(name).strip().lower(): name for name in valid_group_means}}
+    if "yes" in normalized_group_names and "no" in normalized_group_names:
+        yes_name = normalized_group_names["yes"]
+        no_name = normalized_group_names["no"]
+        mean_difference_yes_minus_no = float(
+            valid_group_means[yes_name] - valid_group_means[no_name]
+        )
+    result = {{
+        "status": "PASS" if len(valid_group_means) >= 2 else "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": metric_column,
+        "group_column": group_column,
+        "group_results": group_results,
+        "group_count": int(len(group_results)),
+        "mean_difference": mean_difference,
+        "mean_difference_yes_minus_no": mean_difference_yes_minus_no,
+        "dataset_row_count": int(len(df)),
+        "analyzed_row_count": int(len(working)),
+        "reason": None if len(valid_group_means) >= 2 else "At least two groups with valid numeric means are required.",
+    }}
+'''
+            return code
+
+        code += '''
+result = {
+    "status": "UNSUPPORTED",
+    "analysis_type": "grouped_mean_analysis",
+    "reason": "Could not identify both the explicitly requested numeric metric and grouping column. No overall mean was substituted.",
+    "available_columns": df.columns.tolist(),
+}
+'''
+        return code
 
     # ========================================================
     # GROUPED MEAN: SUBSCRIBED VS NOT SUBSCRIBED

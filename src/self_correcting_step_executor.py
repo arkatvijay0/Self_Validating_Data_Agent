@@ -105,7 +105,9 @@ def load_dataset(filepath):
 def generate_step_code(
     step_text,
     filepath,
-    data_profile=None
+    data_profile=None,
+    target_columns=None,
+    feedback=None
 ):
     """
     Generate Python code for an EDA step.
@@ -119,7 +121,9 @@ def generate_step_code(
     code = generate_code_mock(
         step_text,
         filepath,
-        data_profile
+        data_profile=data_profile,
+        feedback=feedback,
+        target_columns=target_columns,
     )
 
     if not code:
@@ -787,7 +791,8 @@ def execute_self_correcting_step(
                 current_code = generate_step_code(
                     step_text=step_text,
                     filepath=filepath,
-                    data_profile=data_profile
+                    data_profile=data_profile,
+                    target_columns=target_columns,
                 )
 
             except Exception as error:
@@ -1119,6 +1124,44 @@ def execute_self_correcting_step(
                 attempt_number=attempt + 1
             )
         )
+
+        # If the corrector cannot produce new code, make one deterministic
+        # feedback-aware regeneration attempt before stopping the loop.
+        # This avoids executing identical code repeatedly when the corrector's
+        # fallback simply repeats the original rule-based generation.
+        corrected_candidate = correction_result.get("corrected_code")
+        correction_status = correction_result.get("status")
+        if (
+            correction_status != "PASS"
+            or not isinstance(corrected_candidate, str)
+            or not corrected_candidate.strip()
+            or corrected_candidate.strip() == str(current_code).strip()
+        ):
+            try:
+                regenerated_candidate = generate_code_mock(
+                    step_text=step_text,
+                    filepath=filepath,
+                    data_profile=data_profile,
+                    feedback=feedback,
+                    target_columns=target_columns,
+                )
+                if (
+                    isinstance(regenerated_candidate, str)
+                    and regenerated_candidate.strip()
+                    and regenerated_candidate.strip() != str(current_code).strip()
+                ):
+                    correction_result = {
+                        "status": "PASS",
+                        "corrected_code": regenerated_candidate,
+                        "correction_method": "feedback_aware_regeneration",
+                        "corrections": [
+                            "Regenerated code after detecting that the correction step did not provide new code."
+                        ],
+                    }
+            except Exception as regeneration_error:
+                correction_result["feedback_regeneration_error"] = (
+                    f"{type(regeneration_error).__name__}: {regeneration_error}"
+                )
 
         attempt_record["correction"] = (
             correction_result
