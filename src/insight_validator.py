@@ -888,63 +888,216 @@ def validate_correlation_insight(
 
 def validate_grouped_mean_direction_claims(insight, result, user_question=None):
     """
-    Validate generated insight direction separately from the user's claim.
-    A correct insight passes even when it disproves the original user claim.
+    Validate grouped-mean insights against computed group means.
+
+    Supports arbitrary category groups (for example job or region) and retains
+    the subscriber/non-subscriber directional check for yes/no comparisons.
+    A user assumption that is disproved by the data is reported separately from
+    the validity of the generated insight.
     """
+    try:
+        from .grouped_mean_claim_validation import (
+            extract_metric_statement,
+            group_label_is_present,
+            number_is_associated_with_group,
+        )
+    except ImportError:
+        from grouped_mean_claim_validation import (
+            extract_metric_statement,
+            group_label_is_present,
+            number_is_associated_with_group,
+        )
+
     if not isinstance(result, dict):
         return {
-            "pass": False, "overall": "FAIL",
-            "reason": "Grouped result is not a dictionary.", "checks": [],
+            "pass": False,
+            "overall": "FAIL",
+            "reason": "Grouped result is not a dictionary.",
+            "checks": [],
+            "insight_checks": [],
+            "insight_pass": False,
+            "insight_overall": "FAIL",
             "user_claim_validation": {
-                "status": "REVIEW", "pass": None,
-                "reason": "Grouped result is not a dictionary.", "checks": [],
+                "status": "REVIEW",
+                "pass": None,
+                "reason": "Grouped result is not a dictionary.",
+                "checks": [],
             },
         }
 
     def numeric(value):
         try:
-            value = float(value)
-            return value if value == value and abs(value) != float("inf") else None
+            number = float(value)
+            return number if number == number and abs(number) != float("inf") else None
         except (TypeError, ValueError, OverflowError):
             return None
 
+    def number_appears(value, text):
+        """Check a displayed number, allowing comma formatting and rounding."""
+        if value is None:
+            return False
+        # Use a numeric-token scan to avoid matching 12.3 inside 112.30.
+        tokens = re.findall(r"(?<![A-Za-z0-9_])[-+]?\d[\d,]*(?:\.\d+)?", text)
+        for token in tokens:
+            try:
+                shown = float(token.replace(",", ""))
+            except ValueError:
+                continue
+            if abs(shown - value) <= max(0.011, abs(value) * 0.00001):
+                return True
+        return False
+
     metric_results = result.get("metric_results")
-    candidates = (
-        [(str(metric), item) for metric, item in metric_results.items()]
-        if isinstance(metric_results, dict) and metric_results
-        else [(str(result.get("metric_column", "")), result)]
-    )
+    is_multi_metric = isinstance(metric_results, dict) and bool(metric_results)
+    if is_multi_metric:
+        candidates = [(str(metric), item) for metric, item in metric_results.items()]
+        metric_names = [metric for metric, _ in candidates]
+    else:
+        candidates = [(str(result.get("metric_column", "")), result)]
+        metric_names = [candidates[0][0]]
+
+    insight_text = str(insight or "").strip()
+    normalized_insight = insight_text.casefold()
+    question_text = str(user_question or "").casefold()
     insight_checks = []
     user_checks = []
 
     for metric, item in candidates:
         if not isinstance(item, dict):
-            continue
-        groups = item.get("group_results")
-        if not isinstance(groups, dict):
-            continue
-        no_group, yes_group = groups.get("no", {}), groups.get("yes", {})
-        if not isinstance(no_group, dict) or not isinstance(yes_group, dict):
-            continue
-        no_mean = numeric(no_group.get("mean_value", no_group.get("mean")))
-        yes_mean = numeric(yes_group.get("mean_value", yes_group.get("mean")))
-        if no_mean is None or yes_mean is None:
             insight_checks.append({
-                "metric": metric, "pass": False,
-                "reason": "Both subscriber and non-subscriber means must be finite numbers.",
+                "metric": metric,
+                "pass": False,
+                "reason": "Metric result is not a dictionary.",
             })
             continue
+
+        groups = item.get("group_results")
+        if not isinstance(groups, dict) or not groups:
+            insight_checks.append({
+                "metric": metric,
+                "pass": False,
+                "reason": "No grouped means were available to validate.",
+            })
+            continue
+
+        if is_multi_metric:
+            metric_text = extract_metric_statement(
+                insight_text, metric, metric_names
+            )
+            if metric_text is None:
+                insight_checks.append({
+                    "metric": metric,
+                    "check": "metric_statement_present",
+                    "pass": False,
+                    "reason": f"No metric-specific statement was found for '{metric}'.",
+                })
+                continue
+        else:
+            metric_text = insight_text
+
+        normalized_metric_text = metric_text.casefold()
+        metric_is_mentioned = (
+            bool(metric.strip())
+            and metric.casefold() in normalized_insight
+            and (not is_multi_metric or metric_text is not None)
+        )
+        if not metric_is_mentioned:
+            insight_checks.append({
+                "metric": metric,
+                "pass": False,
+                "reason": f"The insight does not mention metric '{metric}'.",
+            })
+            continue
+
+        # Validate all arbitrary category groups by checking both the label
+        # and the numeric mean reported in the generated insight.
+        generic_group_checks = []
+        for group_name, group_data in groups.items():
+            if not isinstance(group_data, dict):
+                generic_group_checks.append({
+                    "group": str(group_name),
+                    "pass": False,
+                    "reason": "Group statistics are not a dictionary.",
+                })
+                continue
+            mean_value = numeric(group_data.get("mean_value", group_data.get("mean")))
+            group_label_found = group_label_is_present(
+                metric_text, group_name
+            )
+            mean_found = number_is_associated_with_group(
+                metric_text, group_name, mean_value
+            )
+            group_pass = group_label_found and mean_found
+            generic_group_checks.append({
+                "group": str(group_name),
+                "mean": mean_value,
+                "group_label_mentioned": group_label_found,
+                "mean_mentioned": mean_found,
+                "pass": group_pass,
+                "reason": None if group_pass else (
+                    f"The insight does not clearly report group '{group_name}' "
+                    "and its validated mean."
+                ),
+            })
+
+        is_binary = "no" in groups and "yes" in groups
+        if not is_binary:
+            insight_checks.extend(generic_group_checks)
+            continue
+
+        no_group = groups.get("no", {})
+        yes_group = groups.get("yes", {})
+        no_mean = numeric(no_group.get("mean_value", no_group.get("mean"))) if isinstance(no_group, dict) else None
+        yes_mean = numeric(yes_group.get("mean_value", yes_group.get("mean"))) if isinstance(yes_group, dict) else None
+
+        # If this result is not actually a valid binary numeric comparison,
+        # use generic per-group validation instead.
+        if no_mean is None or yes_mean is None:
+            insight_checks.extend(generic_group_checks)
+            continue
+
+        # The insight must mention both group labels and their actual means.
+        binary_checks = [
+            {
+                "metric": metric,
+                "check": "metric_mentioned",
+                "pass": metric_is_mentioned,
+                "reason": None if metric_is_mentioned else f"Metric '{metric}' is not mentioned.",
+            },
+            {
+                "metric": metric,
+                "check": "no_group_mean_reported",
+                "pass": (
+                    group_label_is_present(metric_text, "no")
+                    and number_is_associated_with_group(
+                        metric_text, "no", no_mean
+                    )
+                ),
+                "reason": "The insight does not report the validated no-group mean.",
+            },
+            {
+                "metric": metric,
+                "check": "yes_group_mean_reported",
+                "pass": (
+                    group_label_is_present(metric_text, "yes")
+                    and number_is_associated_with_group(
+                        metric_text, "yes", yes_mean
+                    )
+                ),
+                "reason": "The insight does not report the validated yes-group mean.",
+            },
+        ]
+        insight_checks.extend(binary_checks)
 
         actual_direction = (
             "lower" if yes_mean < no_mean
             else "higher" if yes_mean > no_mean
             else "equal"
         )
-        sources = (
-            ("insight", str(insight or "").lower(), insight_checks),
-            ("user_question", str(user_question or "").lower(), user_checks),
-        )
-        for source_name, source_text, target_checks in sources:
+        for source_name, source_text, target_checks in (
+            ("insight", normalized_metric_text, insight_checks),
+            ("user_question", question_text, user_checks),
+        ):
             mentions_subscribers = any(
                 term in source_text for term in ("subscriber", "subscribers", "subscription")
             )
@@ -994,16 +1147,13 @@ def validate_grouped_mean_direction_claims(insight, result, user_question=None):
                 ),
             })
 
-    insight_failures = [item for item in insight_checks if not item.get("pass", False)]
-    user_failures = [item for item in user_checks if not item.get("pass", False)]
+    insight_failures = [check for check in insight_checks if not check.get("pass", False)]
+    user_failures = [check for check in user_checks if not check.get("pass", False)]
     user_status = (
         "NOT_SUPPORTED" if user_failures
         else "SUPPORTED" if user_checks
         else "NOT_ASSESSED"
     )
-    # Preserve the helper's legacy combined verdict for direct callers and
-    # regression tests. The insight-only verdict is exposed separately so the
-    # top-level validator can distinguish a wrong user assumption from a bad insight.
     combined_failures = insight_failures + user_failures
     return {
         "pass": not combined_failures,
@@ -1013,14 +1163,14 @@ def validate_grouped_mean_direction_claims(insight, result, user_question=None):
         "insight_pass": not insight_failures,
         "insight_overall": "PASS" if not insight_failures else "FAIL",
         "reason": "; ".join(
-            item.get("reason", "") for item in combined_failures
+            check.get("reason", "") for check in combined_failures if check.get("reason")
         ) or None,
         "user_claim_validation": {
             "status": user_status,
             "pass": not user_failures if user_checks else None,
             "checks": user_checks,
             "reason": "; ".join(
-                item.get("reason", "") for item in user_failures
+                check.get("reason", "") for check in user_failures if check.get("reason")
             ) or None,
         },
     }

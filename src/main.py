@@ -1084,10 +1084,16 @@ def build_multi_metric_evidence_mapping(insight, evidence, insight_validation):
         }
         metric_checks[metric]["pass"] = all(metric_checks[metric].values())
 
+    detailed_validation = validate_multi_metric_grouped_mean_insight(
+        insight=insight,
+        combined_result=evidence,
+        base_validation=insight_validation,
+    )
     insight_pass = (
         isinstance(insight_validation, dict)
         and insight_validation.get("pass") is True
         and str(insight_validation.get("overall", "")).upper() == "PASS"
+        and detailed_validation.get("pass") is True
     )
     evidence_pass = (
         evidence.get("status") == "PASS"
@@ -1127,6 +1133,11 @@ def build_multi_metric_evidence_mapping(insight, evidence, insight_validation):
 
 def validate_multi_metric_grouped_mean_insight(insight, combined_result, base_validation=None):
     """Require every requested metric and its means/difference to be present in the insight."""
+    try:
+        from .grouped_mean_claim_validation import metric_group_mean_checks
+    except ImportError:
+        from grouped_mean_claim_validation import metric_group_mean_checks
+
     requested = (
         combined_result.get("requested_metric_columns", [])
         if isinstance(combined_result, dict) else []
@@ -1155,15 +1166,33 @@ def validate_multi_metric_grouped_mean_insight(insight, combined_result, base_va
         yes_mean = yes_group.get("mean_value", yes_group.get("mean"))
         difference = result.get("mean_difference_yes_minus_no") if metric_ok else None
 
+        association = (
+            metric_group_mean_checks(insight, metric, result, requested)
+            if metric_ok else {}
+        )
         checks[metric] = {
             "result_valid": metric_ok,
-            "metric_named": str(metric).lower() in text,
-            "non_subscriber_mean_present": metric_ok and number_present(no_mean),
-            "subscriber_mean_present": metric_ok and number_present(yes_mean),
-            "difference_present": metric_ok and number_present(difference),
+            "metric_named": bool(association.get("statement_present")),
+            "non_subscriber_mean_present": bool(
+                association.get("non_subscriber_mean_present")
+            ),
+            "subscriber_mean_present": bool(
+                association.get("subscriber_mean_present")
+            ),
+            "difference_present": bool(
+                association.get("difference_present")
+            ),
+            "reason": association.get("reason"),
         }
         checks[metric]["pass"] = all(
-            value for key, value in checks[metric].items() if key != "pass"
+            checks[metric][key]
+            for key in (
+                "result_valid",
+                "metric_named",
+                "non_subscriber_mean_present",
+                "subscriber_mean_present",
+                "difference_present",
+            )
         )
 
     all_metrics_pass = (
