@@ -1,14 +1,21 @@
 """Rule-based task analyzer for the Self-Validating EDA Agent.
 
-This version uses whole-word column matching, recognizes scalar aggregations,
-and explicitly flags requested metrics that are absent from the dataset.
+The legacy task classification is preserved for backward compatibility.
+A shared, versioned analytical specification is now attached to every
+analysis result under the ``analytical_spec`` key.
 """
+
+try:
+    from analytical_spec import build_analytical_spec, detect_grouped_ranking
+except ImportError:  # Supports package-style imports as well as src on sys.path.
+    from .analytical_spec import build_analytical_spec, detect_grouped_ranking
 
 import re
 
 TASK_TYPES = [
     "descriptive_summary",
     "mean_analysis",
+    "extrema_analysis",
     "trend_analysis",
     "comparison",
     "anomaly_detection",
@@ -100,12 +107,38 @@ def _metric_phrase(query):
     return None
 
 
-def analyze_task_mock(user_query, data_profile):
+def _analyze_task_legacy(user_query, data_profile):
     """Classify a question and identify relevant columns from a dataset profile."""
     query = str(user_query).lower()
     profile_columns = data_profile.get("columns", {}) if isinstance(data_profile, dict) else {}
     columns = list(profile_columns.keys())
     query_column_matches = []
+
+    # Grouped ranking ("which job has the highest average balance?"): route as a
+    # grouped comparison. Before this, the question fell into the scalar
+    # max/min rule and was answered with one overall number.
+    grouped_ranking = detect_grouped_ranking(user_query, profile_columns)
+    if grouped_ranking is not None and grouped_ranking["aggregate"] == "mean" and grouped_ranking["metrics"]:
+        ranked_metric = grouped_ranking["metrics"][0]
+        ranked_group = grouped_ranking["group"]
+        direction_word = "highest" if grouped_ranking["direction"] == "descending" else "lowest"
+        return {
+            "task_type": "comparison",
+            "target_columns": [ranked_metric, ranked_group],
+            "metric_column": ranked_metric,
+            "requested_metric_columns": [ranked_metric],
+            "group_column": ranked_group,
+            "group_columns": [ranked_group],
+            "comparison_metric": "mean",
+            "requested_metric": ranked_metric,
+            "unsupported_metric": False,
+            "analysis_intent": "grouped_mean_comparison",
+            "ranking_direction": grouped_ranking["direction"],
+            "notes": (
+                f"Compute the average {ranked_metric} for every {ranked_group} group "
+                f"and report which group has the {direction_word} value."
+            ),
+        }
 
     for column in columns:
         searchable_name = str(column).lower().replace("_", " ")
@@ -321,6 +354,49 @@ def analyze_task_mock(user_query, data_profile):
             ),
         }
 
+    # Scalar maximum/minimum questions must be routed before generic summaries.
+    explicit_max_intent = any(_contains_term(query, term) for term in ("maximum", "max"))
+    explicit_min_intent = any(_contains_term(query, term) for term in ("minimum", "min"))
+    directional_max_intent = any(_contains_term(query, term) for term in ("highest", "largest", "greatest"))
+    directional_min_intent = any(_contains_term(query, term) for term in ("lowest", "smallest", "least"))
+    continuous_query_column = any(
+        profile_columns.get(c, {}).get("role") == "continuous"
+        for c in query_column_matches
+    )
+    has_max_intent = explicit_max_intent or (directional_max_intent and continuous_query_column)
+    has_min_intent = explicit_min_intent or (directional_min_intent and continuous_query_column)
+    scalar_extrema_intent = (
+        (has_max_intent or has_min_intent)
+        and not any(_contains_term(query, term) for term in
+                    ("by category", "by ", "for each", "per ", "grouped", "rank", "ranking", "which category", "across"))
+    )
+    if scalar_extrema_intent:
+        metric_phrase = _metric_phrase(query)
+        metric_column = next(
+            (c for c in query_column_matches
+             if profile_columns.get(c, {}).get("role") == "continuous"),
+            None,
+        )
+        if metric_column is None:
+            metric_column = next((c for c in query_column_matches if c in profile_columns), None)
+        operation = "maximum" if has_max_intent else "minimum"
+        if metric_column is None and metric_phrase:
+            return {
+                "task_type": "extrema_analysis", "target_columns": [],
+                "metric_column": None, "requested_metric": metric_phrase,
+                "operation": operation, "unsupported_metric": True,
+                "notes": f"The requested {operation} metric '{metric_phrase}' was not matched to a dataset column. Do not substitute another metric.",
+            }
+        return {
+            "task_type": "extrema_analysis",
+            "target_columns": [metric_column] if metric_column else query_column_matches,
+            "metric_column": metric_column,
+            "requested_metric": metric_column or metric_phrase,
+            "operation": operation,
+            "unsupported_metric": metric_column is None,
+            "notes": f"Calculate the {operation} of the explicitly requested numeric metric.",
+        }
+
     # Classify specific numeric aggregation before generic descriptive summary.
     if has_mean_intent:
 
@@ -433,6 +509,123 @@ def analyze_task_mock(user_query, data_profile):
         "target_columns": query_column_matches,
         "notes": "Task classified using a rule-based analyzer and the available dataset profile.",
     }
+
+
+def _synchronize_grouped_mean_legacy_fields(legacy_result, analytical_spec):
+    """
+    Keep legacy consumers aligned with a validated grouped-mean specification.
+
+    The shared specification supports numeric profile roles such as
+    ``numeric``, ``integer`` and ``float``. The legacy analyzer historically
+    recognises only ``continuous`` and can therefore mistake a grouping
+    column for the metric. This narrow synchronisation fixes those metadata
+    fields without changing the legacy task-routing decision.
+    """
+    if not isinstance(legacy_result, dict) or not isinstance(analytical_spec, dict):
+        return legacy_result
+
+    operations = analytical_spec.get("operations") or []
+    metrics = analytical_spec.get("metrics") or []
+    group_by = analytical_spec.get("group_by") or []
+    spec_task_type = analytical_spec.get("task_type")
+    spec_status = str(analytical_spec.get("status", "")).upper()
+
+    # Only synchronise a fully specified, validated grouped-mean request.
+    if (
+        spec_task_type not in ("mean_analysis", "comparison")
+        or "mean" not in operations
+        or not metrics
+        or not group_by
+        or spec_status not in ("READY", "PASS")
+    ):
+        return legacy_result
+
+    metrics = list(dict.fromkeys(
+        value for value in metrics if isinstance(value, str) and value.strip()
+    ))
+    group_by = list(dict.fromkeys(
+        value for value in group_by if isinstance(value, str) and value.strip()
+    ))
+    if not metrics or not group_by:
+        return legacy_result
+
+    # Keep the existing task_type unchanged; downstream routing may depend on it.
+    legacy_result["metric_column"] = metrics[0]
+    legacy_result["requested_metric"] = metrics[0]
+    legacy_result["requested_metric_columns"] = metrics
+    legacy_result["group_column"] = group_by[0]
+    legacy_result["group_columns"] = group_by
+    legacy_result["comparison_metric"] = "mean"
+    legacy_result["target_columns"] = list(dict.fromkeys(metrics + group_by))
+    legacy_result["unsupported_metric"] = False
+
+    # Record the intent only when it is not already more specifically defined.
+    legacy_result.setdefault("analysis_intent", "grouped_mean_comparison")
+    return legacy_result
+
+
+def analyze_task_mock(user_query, data_profile):
+    """
+    Analyze a user question and attach a shared analytical specification.
+
+    Backward compatibility:
+      - Existing task_type, target_columns, metric_column and other legacy
+        fields are retained unchanged.
+      - New consumers can read the complete structured request from
+        result["analytical_spec"].
+      - The legacy analyzer remains responsible for its existing routing
+        decisions during this integration phase.
+    """
+    legacy_result = _analyze_task_legacy(user_query, data_profile)
+
+    if not isinstance(legacy_result, dict):
+        legacy_result = {
+            "task_type": "descriptive_summary",
+            "target_columns": [],
+            "notes": "Legacy task analyzer returned an unexpected result.",
+        }
+
+    try:
+        analytical_spec = build_analytical_spec(
+            user_question=user_query,
+            data_profile=data_profile,
+            legacy_analysis=legacy_result,
+        )
+    except Exception as exc:
+        # Do not break the existing application if specification construction
+        # encounters an unexpected profile shape or parsing issue.
+        analytical_spec = {
+            "schema_version": "1.0",
+            "original_question": str(user_query or ""),
+            "task_type": legacy_result.get("task_type"),
+            "operations": [],
+            "metrics": [],
+            "group_by": [],
+            "categorical_columns": [],
+            "filters": [],
+            "comparisons": [],
+            "statistics": [],
+            "time": {"column": None, "grain": None},
+            "sorting": {"direction": None, "limit": None},
+            "requested_outputs": ["result"],
+            "validation_requirements": [
+                "execution_succeeded",
+                "result_non_empty",
+                "requested_columns_exist",
+            ],
+            "mentioned_columns": [],
+            "issues": [
+                "Analytical specification construction failed: "
+                f"{type(exc).__name__}: {exc}"
+            ],
+            "status": "REVIEW",
+        }
+
+    _synchronize_grouped_mean_legacy_fields(legacy_result, analytical_spec)
+
+    legacy_result["analytical_spec"] = analytical_spec
+    return legacy_result
+
 
 
 if __name__ == "__main__":

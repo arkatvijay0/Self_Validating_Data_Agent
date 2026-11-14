@@ -52,7 +52,12 @@ import pandas as pd
 from code_generator import generate_code_mock
 from validators import self_validate
 from code_corrector import correct_generated_code
-from anomaly_detector import detect_anomalies
+from anomaly_detector import detect_anomalies, select_anomaly_features
+from result_validator import (
+    _apply_filters,
+    merge_step_validation,
+    validate_single_step_analytical_result,
+)
 
 
 # =========================================================
@@ -107,7 +112,8 @@ def generate_step_code(
     filepath,
     data_profile=None,
     target_columns=None,
-    feedback=None
+    feedback=None,
+    analytical_spec=None
 ):
     """
     Generate Python code for an EDA step.
@@ -124,6 +130,7 @@ def generate_step_code(
         data_profile=data_profile,
         feedback=feedback,
         target_columns=target_columns,
+        analytical_spec=analytical_spec,
     )
 
     if not code:
@@ -449,6 +456,8 @@ def identify_statistical_test(
     return None
 
 
+
+
 # =========================================================
 # EXECUTE ONE SELF-CORRECTING STEP
 # =========================================================
@@ -460,7 +469,8 @@ def execute_self_correcting_step(
     data_profile=None,
     dataset_columns=None,
     target_columns=None,
-    test_fault=False
+    test_fault=False,
+    analytical_spec=None
 ):
     """
     Execute one EDA step using a real
@@ -577,17 +587,15 @@ def execute_self_correcting_step(
 
         try:
             source_df = load_dataset(filepath)
+            input_rows = int(len(source_df))
+            filters = list((analytical_spec or {}).get("filters") or [])
+            analysis_df = _apply_filters(source_df, filters)
 
             # Use numeric features, excluding columns explicitly profiled as identifiers.
-            feature_columns = source_df.select_dtypes(include=["number"]).columns.tolist()
-            profile_columns = (data_profile or {}).get("columns", {})
-            feature_columns = [
-                column for column in feature_columns
-                if profile_columns.get(column, {}).get("role") != "identifier"
-            ]
+            feature_columns = select_anomaly_features(analysis_df, analytical_spec, data_profile)
 
             detector_output = detect_anomalies(
-                source_df,
+                analysis_df,
                 feature_columns=feature_columns,
                 contamination=0.05,
                 random_state=42,
@@ -610,9 +618,9 @@ def execute_self_correcting_step(
                 raise ValueError("Isolation Forest anomalies must be a pandas DataFrame.")
             if not isinstance(summary, dict):
                 raise ValueError("Isolation Forest summary must be a dictionary.")
-            if len(results_df) != len(source_df):
+            if len(results_df) != len(analysis_df):
                 raise ValueError(
-                    f"Row-count mismatch: source={len(source_df)}, results={len(results_df)}."
+                    f"Row-count mismatch: source={len(analysis_df)}, results={len(results_df)}."
                 )
             required_columns = {"anomaly_label", "anomaly_score"}
             if not required_columns.issubset(results_df.columns):
@@ -641,7 +649,7 @@ def execute_self_correcting_step(
                     },
                     "row_count": {
                         "pass": True,
-                        "source_rows": int(len(source_df)),
+                        "source_rows": int(len(analysis_df)),
                         "result_rows": int(len(results_df)),
                     },
                     "labels": {
@@ -662,8 +670,8 @@ def execute_self_correcting_step(
             # a small sample, not thousands of anomaly rows or per-row labels.
             anomaly_count = expected_anomalies
             anomaly_percentage = (
-                round((anomaly_count / len(source_df)) * 100, 2)
-                if len(source_df) else 0.0
+                round((anomaly_count / len(analysis_df)) * 100, 2)
+                if len(analysis_df) else 0.0
             )
             sample_limit = 10
             anomaly_sample = anomalies_df.head(sample_limit).copy()
@@ -672,12 +680,16 @@ def execute_self_correcting_step(
                 "status": "PASS",
                 "analysis_type": "anomaly_detection",
                 "method": "IsolationForest",
-                "row_count": int(len(source_df)),
-                "feature_columns": list(feature_columns),
+                "row_count": int(len(analysis_df)),
+                "input_rows": input_rows,
+                "analyzed_rows": int(len(analysis_df)),
+                "operations": ["outlier_detection"],
+                "filters_applied": filters,
+                "feature_columns": list(summary.get("feature_columns") or []),
                 "contamination": 0.05,
                 "anomaly_count": anomaly_count,
                 "anomaly_percentage": anomaly_percentage,
-                "normal_count": int(len(source_df) - anomaly_count),
+                "normal_count": int(len(analysis_df) - anomaly_count),
                 "summary": summary,
                 "sample_limit": sample_limit,
                 "sample_anomalies": anomaly_sample,
@@ -686,24 +698,47 @@ def execute_self_correcting_step(
                 ),
             }
 
+            independent_validation = validate_single_step_analytical_result(
+                filepath=filepath,
+                analytical_spec=analytical_spec or {},
+                step_text=step_text,
+                step_number=step_number,
+                final_result=compact_output,
+            )
+            validation_result = merge_step_validation(
+                validation_result,
+                independent_validation,
+            )
+            independently_validated = (
+                str(validation_result.get("overall", "")).upper() == "PASS"
+            )
             execution_result = {
-                "status": "SUCCESS",
-                "success": True,
-                "stdout": "Isolation Forest completed and output checks passed.",
-                "stderr": "",
-                "result": compact_output,
+                "status": "SUCCESS" if independently_validated else "FAIL",
+                "success": independently_validated,
+                "stdout": (
+                    "Isolation Forest completed and independent validation passed."
+                    if independently_validated
+                    else "Isolation Forest completed, but independent validation did not pass."
+                ),
+                "stderr": "" if independently_validated else "; ".join(
+                    independent_validation.get("errors") or [independent_validation.get("reason", "Independent validation failed.")]
+                ),
+                "result": compact_output if independently_validated else None,
             }
             attempt_record = {
                 "attempt": 1,
                 "code": current_code,
                 "execution": execution_result,
                 "validation": validation_result,
-                "feedback": None,
+                "feedback": None if independently_validated else {
+                    "overall": validation_result.get("overall"),
+                    "independent_validation": independent_validation,
+                },
                 "correction": None,
             }
             attempt_history.append(attempt_record)
             return {
-                "status": "PASS",
+                "status": "PASS" if independently_validated else "UNRESOLVED",
                 "step_number": step_number,
                 "step": step_text,
                 "attempts": attempt_history,
@@ -711,7 +746,7 @@ def execute_self_correcting_step(
                 "final_code": current_code,
                 "final_execution": execution_result,
                 "final_validation": validation_result,
-                "final_result": compact_output,
+                "final_result": compact_output if independently_validated else None,
             }
 
         except Exception as error:
@@ -793,6 +828,7 @@ def execute_self_correcting_step(
                     filepath=filepath,
                     data_profile=data_profile,
                     target_columns=target_columns,
+                    analytical_spec=analytical_spec,
                 )
 
             except Exception as error:
@@ -961,6 +997,20 @@ def execute_self_correcting_step(
             data_series=data_series
         )
 
+        # Stage 6: independently recompute this step against the source CSV
+        # before deciding whether the step can be accepted.
+        independent_validation = validate_single_step_analytical_result(
+            filepath=filepath,
+            analytical_spec=analytical_spec,
+            step_text=step_text,
+            step_number=step_number,
+            final_result=execution_result.get("result"),
+        )
+        validation_result = merge_step_validation(
+            validation_result,
+            independent_validation,
+        )
+
         print(
             "\nValidation status:"
         )
@@ -1121,7 +1171,9 @@ def execute_self_correcting_step(
 
                 data_profile=data_profile,
 
-                attempt_number=attempt + 1
+                attempt_number=attempt + 1,
+
+                analytical_spec=analytical_spec
             )
         )
 
@@ -1144,6 +1196,7 @@ def execute_self_correcting_step(
                     data_profile=data_profile,
                     feedback=feedback,
                     target_columns=target_columns,
+                    analytical_spec=analytical_spec,
                 )
                 if (
                     isinstance(regenerated_candidate, str)

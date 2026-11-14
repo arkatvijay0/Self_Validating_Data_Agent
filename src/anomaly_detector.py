@@ -20,6 +20,38 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
+def select_anomaly_features(df, analytical_spec=None, data_profile=None):
+    """
+    Choose the Isolation Forest features, identically for execution and for
+    independent validation.
+
+    1. Numeric columns named in the question ("anomalies in customer balances")
+       are used alone. Previously they were ignored, so every anomaly question
+       returned the same result.
+    2. Otherwise all numeric columns are used, except identifiers, binary 0/1
+       indicators (e.g. a conversion flag that duplicates the target) and
+       identifier-like names.
+    """
+    numeric = df.select_dtypes(include=["number"]).columns.tolist()
+    spec = analytical_spec if isinstance(analytical_spec, dict) else {}
+    profile_columns = (data_profile or {}).get("columns", {}) if isinstance(data_profile, dict) else {}
+
+    requested = [str(m) for m in (spec.get("metrics") or []) if str(m) in numeric]
+    if requested:
+        return list(dict.fromkeys(requested))
+
+    identifiers = set(spec.get("identifier_columns") or [])
+    identifiers |= {c for c, info in profile_columns.items() if info.get("role") == "identifier"}
+    candidates = [c for c in numeric if c not in identifiers]
+    filtered = [
+        c for c in candidates
+        if df[c].nunique(dropna=True) > 2
+        and not str(c).lower().endswith(("_id", "_number", "_no", "_index"))
+        and str(c).lower() != "id"
+    ]
+    return filtered or candidates
+
+
 def detect_anomalies(
     df: pd.DataFrame,
     feature_columns: Optional[Sequence[str]] = None,

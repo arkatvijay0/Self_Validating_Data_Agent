@@ -62,12 +62,13 @@ df = pd.read_csv(r"{filepath}")
 # RULE-BASED CODE GENERATOR
 # ============================================================
 
-def generate_code_mock(
+def _generate_code_legacy(
     step_text,
     filepath,
     data_profile=None,
     feedback=None,
-    target_columns=None
+    target_columns=None,
+    analytical_spec=None
 ):
     """
     Generate executable Python code for an EDA plan step.
@@ -88,6 +89,11 @@ def generate_code_mock(
 
     feedback : str, optional
         Feedback from a previous failed execution.
+
+    analytical_spec : dict, optional
+        Structured requirements extracted from the original user question.
+        The parameter is accepted for end-to-end propagation; the next
+        generator phase will use it to drive generic code generation.
 
     Returns
     -------
@@ -1453,6 +1459,79 @@ else:
 
 
     # ========================================================
+    # SCALAR MAXIMUM / MINIMUM
+    # ========================================================
+    extrema_max_intent = bool(re.search(
+        r"\b(maximum|max|highest\s+value|largest\s+value|greatest\s+value)\b",
+        step_lower,
+    ))
+    extrema_min_intent = bool(re.search(
+        r"\b(minimum|min|smallest\s+value|lowest\s+value|least\s+value)\b",
+        step_lower,
+    ))
+    if extrema_max_intent or extrema_min_intent:
+        operation = "maximum" if extrema_max_intent else "minimum"
+        try:
+            available_columns = pd.read_csv(filepath, nrows=0).columns.tolist()
+        except Exception:
+            available_columns = []
+        match = re.search(r"""(?:in|of)\s+['"]([^'"]+)['"]""", str(step_text), re.IGNORECASE)
+        requested_column = match.group(1).strip() if match else None
+        actual_column = None
+        if requested_column:
+            for column in available_columns:
+                if str(column).strip().lower() == requested_column.lower():
+                    actual_column = column
+                    break
+        if actual_column is None:
+            def _column_words(value):
+                return re.findall(r"[a-z0-9]+", str(value).lower())
+            prompt_words = _column_words(step_text)
+            for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+                column_words = _column_words(column)
+                width = len(column_words)
+                if width and any(
+                    prompt_words[index:index + width] == column_words
+                    for index in range(len(prompt_words) - width + 1)
+                ):
+                    actual_column = column
+                    break
+        if actual_column is None:
+            code += f"""
+result = {{
+    "status": "UNSUPPORTED",
+    "analysis_type": "extrema_analysis",
+    "operation": {operation!r},
+    "reason": "Could not identify the requested metric column.",
+    "available_columns": df.columns.tolist(),
+}}
+"""
+            return code
+        code += f"""
+requested_column = {actual_column!r}
+numeric_values = pd.to_numeric(df[requested_column], errors="coerce").dropna()
+extreme_value = (
+    float(numeric_values.max()) if not numeric_values.empty else None
+) if {operation!r} == "maximum" else (
+    float(numeric_values.min()) if not numeric_values.empty else None
+)
+result = {{
+    "status": "PASS" if not numeric_values.empty else "FAIL",
+    "analysis_type": "extrema_analysis",
+    "operation": {operation!r},
+    "metric_column": requested_column,
+    "value": extreme_value,
+    "maximum": extreme_value if {operation!r} == "maximum" else None,
+    "minimum": extreme_value if {operation!r} == "minimum" else None,
+    "valid_value_count": int(numeric_values.count()),
+    "dataset_row_count": int(len(df)),
+    "reason": None if not numeric_values.empty else "No valid numeric values were found.",
+}}
+"""
+        return code
+
+
+    # ========================================================
     # 12. GENERAL MEAN / AVERAGE
     # ========================================================
 
@@ -1637,6 +1716,15 @@ result = {
             and any(word in step_lower for word in ("multivariate", "across numeric", "numeric features"))
         )
     ):
+        # Columns named in the question ("anomalies in customer balances") are the
+        # features; otherwise all numeric columns are used. Before this, the
+        # question's column was ignored and every question got the same result.
+        _profile_columns = (data_profile or {}).get("columns", {}) if isinstance(data_profile, dict) else {}
+        _requested_features = [
+            str(column) for column in ((analytical_spec or {}).get("metrics") or [])
+            if _profile_columns.get(column, {}).get("role") in ("continuous", "numeric", "integer", "float")
+        ] if isinstance(analytical_spec, dict) else []
+        code += "requested_feature_columns = " + repr(_requested_features) + "\n"
         code += """
 from sklearn.ensemble import IsolationForest
 from sklearn.impute import SimpleImputer
@@ -1648,6 +1736,17 @@ usable_columns = [
     if numeric_df[column].notna().any()
     and numeric_df[column].nunique(dropna=True) > 1
 ]
+if requested_feature_columns:
+    usable_columns = [c for c in requested_feature_columns if c in usable_columns] or usable_columns
+else:
+    # Binary indicators (e.g. a 0/1 conversion flag) and identifier-like columns
+    # are not meaningful features for unusualness.
+    _filtered = [
+        c for c in usable_columns
+        if numeric_df[c].nunique(dropna=True) > 2
+        and not str(c).lower().endswith(("_id", "id", "_number", "_no", "_index"))
+    ]
+    usable_columns = _filtered or usable_columns
 
 if len(df) < 3:
     result = {
@@ -1793,6 +1892,223 @@ result = {
 }
 """
     return code
+
+
+def _select_spec_for_step(step_text, spec):
+    terms = {
+        "mean": ("average", "mean", "avg"), "median": ("median",),
+        "sum": ("sum", "total"), "count": ("count", "number of", "how many"),
+        "min": ("minimum", "smallest", "lowest"), "max": ("maximum", "largest", "highest"),
+        "std": ("standard deviation", "std"), "variance": ("variance",),
+        "nunique": ("distinct", "unique"), "missing_values": ("missing", "null"),
+        "duplicate_count": ("duplicate",), "describe": ("describe", "summary", "profile"),
+        "correlation": ("correlation", "correlated", "relationship"),
+        "outlier_detection": ("outlier", "anomaly"), "time_trend": ("trend", "over time", "monthly", "weekly", "yearly"),
+        "rank": ("rank", "top ", "bottom "),
+    }
+    ops = spec.get("operations") or []
+    step_lower = str(step_text or "").casefold()
+    if step_lower.startswith("apply all explicitly requested filters"):
+        chosen = dict(spec)
+        chosen["operations"] = ["filter_only"]
+        return chosen
+    if "independently recompute" in step_lower:
+        chosen = dict(spec)
+        return chosen
+    if len(ops) <= 1:
+        selected = ops
+    else:
+        text = str(step_text or "").casefold()
+        selected = [op for op in ops if any(t in text for t in terms.get(op, ()))]
+    if "rank" in selected and "mean" in ops and spec.get("group_by"):
+        selected = ["mean"] + [op for op in selected if op != "mean"]
+    if not selected:
+        return None
+    chosen = dict(spec)
+    chosen["operations"] = selected
+    return chosen
+
+
+def _build_spec_driven_code(step_text, filepath, spec):
+    payload = {k: spec.get(k, default) for k, default in (
+        ("operations", []), ("metrics", []), ("group_by", []), ("filters", []),
+        ("statistics", []), ("time", {}), ("sorting", {}),
+        ("outlier_method", "IQR")
+    )}
+    template = r'''import pandas as pd
+import numpy as np
+
+df = pd.read_csv({filepath})
+spec = {spec}
+requested_step = {step}
+
+def unsupported(message):
+    return {{"status":"UNSUPPORTED","analysis_type":"specification_driven",
+             "reason":message,"requested_step":requested_step,
+             "available_columns":df.columns.tolist()}}
+
+try:
+    ops, metrics = spec["operations"], spec.get("metrics", [])
+    groups, filters = spec.get("group_by", []), spec.get("filters", [])
+    supported = {{"mean","median","sum","count","min","max","std","variance","nunique",
+                 "missing_values","duplicate_count","describe","correlation",
+                 "outlier_detection","time_trend","rank","filter_only"}}
+    required = metrics + groups + [f.get("column") for f in filters]
+    missing = [c for c in required if c and c not in df.columns]
+    if missing: result = unsupported("Missing columns: " + ", ".join(dict.fromkeys(missing)))
+    elif any(op not in supported for op in ops): result = unsupported("Unsupported requested operation.")
+    else:
+        work = df.copy()
+        for f in filters:
+            c, op, v = f["column"], f["operator"], f["value"]
+            s = pd.to_numeric(work[c], errors="coerce")
+            masks = {{">":s>v, ">=":s>=v, "<":s<v, "<=":s<=v, "==":s==v, "!=":s!=v}}
+            if op not in masks: raise ValueError("Unsupported filter operator: " + str(op))
+            work = work.loc[masks[op]].copy()
+        out = {{}}
+        if "filter_only" in ops:
+            out["filter_summary"] = {{"input_rows": int(len(df)), "filtered_rows": int(len(work)),
+                "rows_removed": int(len(df) - len(work)), "filters_applied": filters}}
+        if "missing_values" in ops:
+            out["missing_values"] = {{"total_missing_cells":int(work.isna().sum().sum()),
+                "by_column":{{str(k):int(v) for k,v in work.isna().sum().items()}}}}
+        if "duplicate_count" in ops: out["duplicate_count"] = int(work.duplicated().sum())
+        if "describe" in ops: out["describe"] = work.describe(include="all").to_dict()
+        agg = [o for o in ops if o in {{"mean","median","sum","count","min","max","std","variance","nunique"}}]
+        def calc(s, op):
+            if op in ("mean","median","sum","std","variance") and not pd.api.types.is_numeric_dtype(s):
+                raise TypeError("Numeric aggregation requested for non-numeric metric.")
+            if op == "mean": return pd.to_numeric(s,errors="coerce").mean()
+            if op == "median": return pd.to_numeric(s,errors="coerce").median()
+            if op == "sum": return pd.to_numeric(s,errors="coerce").sum()
+            if op == "count": return s.count()
+            if op == "min": return s.min()
+            if op == "max": return s.max()
+            if op == "std": return pd.to_numeric(s,errors="coerce").std()
+            if op == "variance": return pd.to_numeric(s,errors="coerce").var()
+            return s.nunique()
+        if agg and not metrics and agg == ["count"]:
+            if groups:
+                out["aggregations"] = work.groupby(groups, dropna=False).size().reset_index(name="row_count").to_dict(orient="records")
+            else:
+                out["aggregations"] = {{"row_count": int(len(work))}}
+        elif agg and not metrics:
+            result = unsupported("No metric column was identified.")
+        elif agg:
+            if groups:
+                rows = []
+                sizes = []
+                for key, frame in work.groupby(groups,dropna=False):
+                    key = key if isinstance(key,tuple) else (key,)
+                    row = dict(zip(groups,key))
+                    size_row = dict(zip(groups,key))
+                    size_row["row_count"] = int(len(frame))
+                    for m in metrics:
+                        size_row[m+"__valid_count"] = int(frame[m].count())
+                        for op in agg:
+                            val = calc(frame[m],op)
+                            row[m+"__"+op] = None if pd.isna(val) else (int(val) if op in ("count","nunique") else float(val))
+                    rows.append(row)
+                    sizes.append(size_row)
+                out["aggregations"] = rows
+                if metrics:
+                    out["group_sizes"] = sizes
+            else:
+                vals = {{}}
+                for m in metrics:
+                    for op in agg:
+                        val = calc(work[m],op)
+                        vals[m+"__"+op] = None if pd.isna(val) else (int(val) if op in ("count","nunique") else float(val))
+                out["aggregations"] = vals
+        if "correlation" in ops:
+            if len(metrics)<2 or not all(pd.api.types.is_numeric_dtype(work[c]) for c in metrics):
+                result = unsupported("Correlation requires at least two identified numeric metrics.")
+            else:
+                methods = spec.get("statistics") or ["pearson"]
+                out["correlation"] = {{m:work[metrics].corr(method=m).to_dict() for m in methods if m in ("pearson","spearman")}}
+        if "outlier_detection" in ops:
+            method = str(spec.get("outlier_method") or "IQR")
+            if method.replace("_", "").replace("-", "").casefold() == "isolationforest":
+                result = unsupported("Isolation Forest must be executed by the dedicated anomaly detector, not generated IQR code.")
+            elif not metrics: result = unsupported("Outlier detection requires an identified metric.")
+            else:
+                found = {{}}
+                for m in metrics:
+                    s = pd.to_numeric(work[m],errors="coerce").dropna()
+                    if method == "ZScore":
+                        mean = float(s.mean()) if len(s) else 0.0
+                        std = float(s.std(ddof=0)) if len(s) else 0.0
+                        z = ((s - mean) / std) if std > 0 else pd.Series(0.0, index=s.index)
+                        found[m]={{"method":"ZScore","threshold":3.0,"mean":mean,
+                            "standard_deviation":std,"outlier_count":int((z.abs()>3.0).sum()),
+                            "valid_count":int(s.count())}}
+                    else:
+                        q1,q3=s.quantile([.25,.75]); iqr=q3-q1; lo,hi=q1-1.5*iqr,q3+1.5*iqr
+                        found[m]={{"method":"IQR","lower_bound":float(lo),"upper_bound":float(hi),
+                            "outlier_count":int(((s<lo)|(s>hi)).sum()),"valid_count":int(s.count())}}
+                out["outlier_detection"] = found
+        if "time_trend" in ops:
+            c=spec.get("time",{{}}).get("column"); grain=spec.get("time",{{}}).get("grain") or "M"
+            if not c or c not in work.columns or not metrics: result=unsupported("Time trend requires a resolved date column and metric.")
+            else:
+                dates=pd.to_datetime(work[c],errors="coerce"); temp=work.loc[dates.notna()].copy()
+                temp["_period"]=dates.loc[dates.notna()].dt.to_period(grain).astype(str); rows=[]
+                for period,frame in temp.groupby("_period",sort=True):
+                    row={{"period":period}}
+                    for m in metrics: row[m+"__sum"]=float(pd.to_numeric(frame[m],errors="coerce").sum())
+                    rows.append(row)
+                out["time_trend"]=rows
+        if "rank" in ops:
+            if not metrics: result=unsupported("Ranking requires an identified metric.")
+            elif groups and "aggregations" in out:
+                m=metrics[0]; key=m+"__"+(agg[0] if agg else "mean")
+                asc=spec.get("sorting",{{}}).get("direction")=="ascending"
+                rows=sorted(out["aggregations"],key=lambda r:r.get(key) if r.get(key) is not None else float("-inf"),reverse=not asc)
+                limit=spec.get("sorting",{{}}).get("limit"); out["ranking"]=rows[:limit] if limit else rows
+            else:
+                m=metrics[0]; asc=spec.get("sorting",{{}}).get("direction")=="ascending"
+                ranked=work.sort_values(m,ascending=asc,na_position="last")
+                limit=spec.get("sorting",{{}}).get("limit")
+                out["ranking"]=ranked.head(limit).to_dict(orient="records") if limit else ranked.to_dict(orient="records")
+        if "result" not in locals():
+            result={{"status":"PASS","analysis_type":"specification_driven","operations":ops,
+                "metrics":metrics,"group_by":groups,"filters_applied":filters,
+                "input_rows":int(len(df)),"analyzed_rows":int(len(work)),"operation_results":out}}
+except Exception as exc:
+    result={{"status":"FAIL","analysis_type":"specification_driven",
+             "reason":type(exc).__name__+": "+str(exc),"requested_step":requested_step}}
+'''
+    return template.format(filepath=repr(os.path.abspath(filepath)), spec=repr(payload), step=repr(str(step_text)))
+
+
+def generate_code_mock(step_text, filepath, data_profile=None, feedback=None,
+                       target_columns=None, analytical_spec=None):
+    if isinstance(analytical_spec, dict):
+        if str(step_text or "").strip().casefold().startswith("stop:"):
+            return _generate_code_legacy(step_text, filepath, data_profile, feedback, target_columns, None)
+        if analytical_spec.get("status") == "REVIEW":
+            reason = "; ".join(analytical_spec.get("issues", [])) or "The request needs clarification."
+            return ("import pandas as pd\n" + f"df=pd.read_csv({os.path.abspath(filepath)!r})\n" +
+                    f"result={{'status':'REVIEW','reason':{reason!r},'available_columns':df.columns.tolist()}}\n")
+        if (
+            str(analytical_spec.get("outlier_method") or "").replace("_", "").replace("-", "").casefold()
+            == "isolationforest"
+            and "outlier_detection" in (analytical_spec.get("operations") or [])
+            and "isolation forest" in str(step_text or "").casefold()
+        ):
+            return (
+                "import pandas as pd\n"
+                + f"df=pd.read_csv({os.path.abspath(filepath)!r})\n"
+                + "result={'status':'UNSUPPORTED','reason':'Isolation Forest must use the dedicated detector execution path.'}\n"
+            )
+        selected = _select_spec_for_step(step_text, analytical_spec)
+        if selected:
+            return _build_spec_driven_code(step_text, filepath, selected)
+        return ("import pandas as pd\n" + f"df=pd.read_csv({os.path.abspath(filepath)!r})\n" +
+                "result={'status':'UNSUPPORTED','reason':'Planner step does not map to a requested operation.',"
+                f"'requested_step':{str(step_text)!r},'available_columns':df.columns.tolist()}}\n")
+    return _generate_code_legacy(step_text, filepath, data_profile, feedback, target_columns, analytical_spec)
+
 
 # LOCAL TEST
 # ============================================================

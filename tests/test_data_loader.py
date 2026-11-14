@@ -32,4 +32,4 @@ def test_profile_dataset_reports_basic_statistics(tmp_path):
     assert result["columns"]["age"]["mean"] == 30.0
     assert result["columns"]["age"]["min"] == 20.0
     assert result["columns"]["age"]["max"] == 40.0
-    assert result["columns"]["city"]["role"] == "text_or_id"
+    assert result["columns"]["city"]["role"] == "text_or_id"	

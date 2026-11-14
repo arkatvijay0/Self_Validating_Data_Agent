@@ -1,0 +1,11 @@
+Customer_ID,Age,Gender,City,Total_Purchases,Total_Spend,Membership
+C001,22,Male,Bangalore,5,2500,Regular
+C002,28,Female,Mysore,8,4000,Premium
+C003,35,Male,Bangalore,10,6000,Premium
+C004,24,Female,Chennai,4,1800,Regular
+C005,42,Male,Mysore,12,7200,Premium
+C006,31,Female,Bangalore,7,3500,Regular
+C007,26,Male,Chennai,6,3000,Regular
+C008,38,Female,Mysore,9,5400,Premium
+C009,45,Male,Bangalore,15,9000,Premium
+C010,29,Female,Chennai,5,2800,Regular

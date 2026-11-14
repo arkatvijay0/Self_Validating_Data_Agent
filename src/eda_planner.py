@@ -2,7 +2,241 @@ import json
 import re
 
 
-def generate_plan_mock(task_type, data_profile, user_query):
+
+def _format_filter_conditions(filters):
+    """Render parsed, explicit filter conditions as readable plan instructions."""
+    rendered = []
+    for item in filters or []:
+        if not isinstance(item, dict):
+            continue
+        column = item.get("column")
+        operator = item.get("operator")
+        value = item.get("value")
+        if column and operator in {"==", "!=", ">", ">=", "<", "<="} and isinstance(value, (int, float)):
+            rendered.append(f"`{column}` {operator} {value:g}")
+    return rendered
+
+
+def _build_plan_from_analytical_spec(spec):
+    """
+    Build plan steps from the shared analytical specification.
+
+    This function deliberately describes the requested work without selecting
+    substitute columns or silently dropping requested metrics/groupings.
+    """
+    if not isinstance(spec, dict) or spec.get("status") not in {"READY", "REVIEW"}:
+        return None
+
+    operations = list(dict.fromkeys(spec.get("operations") or []))
+    metrics = list(dict.fromkeys(spec.get("metrics") or []))
+    group_by = list(dict.fromkeys(spec.get("group_by") or []))
+    filters = _format_filter_conditions(spec.get("filters"))
+    comparisons = spec.get("comparisons") or []
+    statistics = spec.get("statistics") or []
+    time_info = spec.get("time") or {}
+    sorting = spec.get("sorting") or {}
+    requested_outputs = spec.get("requested_outputs") or []
+
+    # Do not take over legacy routing when the parser could not identify
+    # an analytical operation. Its existing task-specific rules may still help.
+    if not operations:
+        return None
+
+    steps = []
+    if filters:
+        steps.append(
+            "Apply all explicitly requested filters before calculating results: "
+            + "; ".join(filters)
+            + ". Preserve the filtered row count and report it."
+        )
+
+    grouping_text = (
+        " and ".join(f"`{column}`" for column in group_by)
+        if group_by else None
+    )
+
+    numeric_operations = {
+        "mean": "arithmetic mean",
+        "median": "median",
+        "sum": "sum",
+        "min": "minimum",
+        "max": "maximum",
+        "std": "standard deviation",
+        "variance": "variance",
+        "quantile": "requested quartile/percentile/quantile",
+    }
+
+    for operation in operations:
+        if operation in numeric_operations:
+            if not metrics:
+                steps.append(
+                    f"STOP: The requested {numeric_operations[operation]} "
+                    "operation has no confidently identified numeric metric. "
+                    "Do not substitute another column; request clarification "
+                    "or report the available numeric columns."
+                )
+                continue
+            for metric in metrics:
+                if grouping_text:
+                    steps.append(
+                        f"Group the source data by {grouping_text} and calculate "
+                        f"the {numeric_operations[operation]} of `{metric}` "
+                        "within every group. Report group sizes and valid "
+                        "numeric observation counts."
+                    )
+                else:
+                    steps.append(
+                        f"Calculate the {numeric_operations[operation]} of "
+                        f"`{metric}` using valid numeric observations. Report "
+                        "the metric name and valid observation count."
+                    )
+
+        elif operation == "count":
+            if metrics:
+                for metric in metrics:
+                    steps.append(
+                        f"Count valid, non-missing observations in `{metric}`"
+                        + (f" within each group defined by {grouping_text}." if grouping_text else ".")
+                    )
+            else:
+                steps.append(
+                    "Count source rows"
+                    + (f" within each group defined by {grouping_text}." if grouping_text else ".")
+                )
+
+        elif operation in {"missing_values", "duplicate_count", "describe"}:
+            labels = {
+                "missing_values": "Calculate missing-value counts and percentages for every requested or available column.",
+                "duplicate_count": "Count fully duplicated rows in the source dataset and report the duplicate-row definition.",
+                "describe": "Generate descriptive statistics for suitable numeric columns and frequency summaries for categorical columns.",
+            }
+            steps.append(labels[operation])
+
+        elif operation == "correlation":
+            if len(metrics) < 2:
+                steps.append(
+                    "STOP: Correlation requires at least two confidently identified "
+                    "numeric metrics. Do not choose arbitrary columns."
+                )
+            else:
+                for i, left in enumerate(metrics):
+                    for right in metrics[i + 1:]:
+                        methods = ", ".join(statistics) if statistics else "Pearson and Spearman"
+                        steps.append(
+                            f"Calculate {methods} correlation between `{left}` "
+                            f"and `{right}` using paired valid observations. "
+                            "Report sample size and interpret association, not causation."
+                        )
+
+        elif operation == "outlier_detection":
+            outlier_method = str(spec.get("outlier_method") or "IQR")
+            if outlier_method.replace("_", "").replace("-", "").casefold() == "isolationforest":
+                steps.append(
+                    "Use Isolation Forest to detect multivariate anomalies across "
+                    "eligible numeric features. Automatically select numeric features, "
+                    "excluding identifiers and all-missing columns. Do not require a "
+                    "single metric column. Report anomaly and normal counts, anomaly "
+                    "percentage, selected features, and anomaly scores. An anomaly is "
+                    "a review flag, not proof of an error or fraud."
+                )
+            elif not metrics:
+                steps.append(
+                    f"STOP: {outlier_method} outlier detection has no confidently "
+                    "identified numeric metric. Do not substitute another column."
+                )
+            else:
+                for metric in metrics:
+                    if outlier_method == "ZScore":
+                        steps.append(
+                            f"Detect potential outliers in `{metric}` using the "
+                            "Z-score method with an absolute z-score threshold of 3. "
+                            "Report mean, standard deviation, threshold, valid count, "
+                            "and outlier count."
+                        )
+                    else:
+                        steps.append(
+                            f"Detect potential outliers in `{metric}` using the IQR "
+                            "method (1.5 × IQR), report lower and upper bounds and "
+                            "counts, and distinguish statistical outliers from "
+                            "confirmed errors."
+                        )
+
+        elif operation == "time_trend":
+            time_column = time_info.get("column")
+            grain = time_info.get("grain")
+            if not time_column:
+                steps.append(
+                    "STOP: A time-trend operation requires an identifiable date/time "
+                    "column. Do not assume a date column when multiple candidates exist."
+                )
+            elif not metrics:
+                steps.append(
+                    "STOP: A time-trend operation requires a numeric metric. "
+                    "Do not select an arbitrary metric."
+                )
+            else:
+                for metric in metrics:
+                    steps.append(
+                        f"Aggregate `{metric}` over `{time_column}`"
+                        + (f" at frequency `{grain}`" if grain else " at a clearly stated suitable time frequency")
+                        + ", sort periods chronologically, and report period totals/means as requested."
+                    )
+
+        elif operation == "rank":
+            direction = sorting.get("direction") or "descending"
+            limit = sorting.get("limit")
+            for metric in metrics:
+                steps.append(
+                    f"Rank results by `{metric}` in {direction} order"
+                    + (f" and return the top/bottom {limit} rows as requested." if limit else ".")
+                )
+
+        elif operation == "nunique":
+            for column in metrics or spec.get("mentioned_columns", []):
+                steps.append(f"Count distinct values in `{column}`.")
+
+        else:
+            steps.append(
+                f"STOP: The requested operation `{operation}` is not yet supported "
+                "by the planner. Do not silently replace it with a different analysis."
+            )
+
+    if comparisons:
+        steps.append(
+            "Preserve every requested comparison and compare only the groups and "
+            "metrics explicitly identified in the analytical specification."
+        )
+
+    if grouping_text and not any(
+        step.startswith("Group the source data") for step in steps
+    ):
+        steps.append(
+            f"Preserve the requested grouping columns {grouping_text} in the result; "
+            "do not collapse the output to a single overall value."
+        )
+
+    is_isolation_forest_plan = (
+        str(spec.get("outlier_method") or "").replace("_", "").replace("-", "").casefold()
+        == "isolationforest"
+        and "outlier_detection" in operations
+    )
+    # requested_outputs describes the desired response format (for example,
+    # "result" or "chart"), not a data-analysis operation. Keep it in the
+    # analytical specification, but do not turn it into an executable step.
+
+    # Isolation Forest has a dedicated deterministic re-execution and
+    # independent validation path inside the step executor. Do not append a
+    # generic code-generation step that would be misrouted as unsupported.
+    if str(spec.get("outlier_method") or "").replace("_", "").replace("-", "").casefold() != "isolationforest":
+        steps.append(
+            "Independently recompute the requested operations using the same source "
+            "rows, filters, metrics, and grouping columns. Verify that no requested "
+            "operation, metric, grouping, or filter was omitted."
+        )
+    return steps
+
+
+def generate_plan_mock(task_type, data_profile, user_query, analytical_spec=None):
     """
     Generate an EDA plan using the actual user question
     and dataset profile.
@@ -42,6 +276,12 @@ def generate_plan_mock(task_type, data_profile, user_query):
         return [
             "STOP: The question contains contradictory direction terms ('higher' and 'lower'). Do not generate or execute analysis code. Ask the user to clarify whether they mean higher or lower average balance."
         ]
+
+    # Shared-specification planning route. Legacy task-specific routing remains
+    # available when the specification cannot confidently describe the request.
+    spec_plan = _build_plan_from_analytical_spec(analytical_spec)
+    if spec_plan:
+        return spec_plan
 
     # BANK_CONVERSION_ROUTING_FIX_V1
     # Match natural-language names to columns actually present in this dataset.
@@ -252,6 +492,41 @@ def generate_plan_mock(task_type, data_profile, user_query):
     # ==================================================
     # Specific mean/average questions with filter preservation
     # ==================================================
+
+    if task_type == "extrema_analysis":
+        def _whole_phrase_match(text, phrase):
+            phrase = str(phrase).strip().replace("_", " ")
+            if not phrase:
+                return False
+            pattern = r"(?<![\w])" + re.escape(phrase) + r"(?![\w])"
+            return re.search(pattern, text, flags=re.IGNORECASE) is not None
+
+        requested_column = next(
+            (col for col in sorted(columns, key=lambda value: len(str(value)), reverse=True)
+             if _whole_phrase_match(query, str(col))),
+            None,
+        )
+        if requested_column is None:
+            extrema_aliases = {
+                "revenue": "Total Revenue", "sales": "Total Revenue",
+                "profit": "Total Profit", "cost": "Total Cost",
+                "units": "Units Sold", "quantity": "Units Sold",
+                "account balance": "balance", "call duration": "duration",
+            }
+            for alias, destination in sorted(extrema_aliases.items(), key=lambda item: len(item[0]), reverse=True):
+                if destination in columns and _whole_phrase_match(query, alias):
+                    requested_column = destination
+                    break
+        if requested_column is None:
+            return ["STOP: The requested maximum/minimum metric could not be matched to a dataset column. Do not substitute another metric. Return an unsupported-metric response and list available columns."]
+        operation = (
+            "maximum" if re.search(r"\b(maximum|max|highest\s+value|largest\s+value|greatest\s+value)\b", query)
+            else "minimum"
+        )
+        return [
+            f"Calculate the {operation} numeric value of '{requested_column}' from the source dataset, using valid numeric observations only. Report the operation, exact metric column, extreme value, and valid numeric observation count. Do not return a generic dataset summary.",
+            f"Independently recompute the {operation} of '{requested_column}' from the same source data and verify that the reported value and valid numeric observation count match."
+        ]
 
     if task_type == "mean_analysis":
         def _whole_phrase_match(text, phrase):

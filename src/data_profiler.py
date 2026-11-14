@@ -1,12 +1,21 @@
+
 import pandas as pd
 import numpy as np
 from scipy import stats
 import json
+import math
 
 
 def infer_role(series):
     """
     Determine the likely role of a column.
+
+    Roles:
+        identifier
+        time_index
+        continuous
+        categorical
+        text_or_id
     """
 
     column_name = str(series.name).lower()
@@ -22,10 +31,7 @@ def infer_role(series):
         "number"
     ]
 
-    if any(
-        keyword in column_name
-        for keyword in id_keywords
-    ):
+    if any(keyword in column_name for keyword in id_keywords):
         return "identifier"
 
     # --------------------------------------------------
@@ -66,16 +72,31 @@ def infer_role(series):
         return "continuous"
 
     # --------------------------------------------------
-    # Categorical columns
+    # Improved categorical detection
     # --------------------------------------------------
 
-    if len(series) > 0:
+    non_null = series.dropna()
+    row_count = len(non_null)
 
-        unique_ratio = (
-            series.nunique(dropna=True) / len(series)
+    if row_count > 0:
+
+        unique_count = non_null.nunique()
+
+        unique_ratio = unique_count / row_count
+
+        # Adaptive limit supports both small and large datasets.
+        # For small datasets, at least 10 unique values are allowed.
+        # For larger datasets, the threshold is capped at 50.
+
+        max_categories = max(
+            10,
+            min(50, int(math.sqrt(row_count) * 2))
         )
 
-        if unique_ratio < 0.05:
+        if (
+            unique_count <= max_categories
+            and unique_ratio <= 0.5
+        ):
             return "categorical"
 
     # --------------------------------------------------
@@ -83,6 +104,7 @@ def infer_role(series):
     # --------------------------------------------------
 
     return "text_or_id"
+
 
 def profile_dataset(filepath):
     """
@@ -114,7 +136,10 @@ def profile_dataset(filepath):
             "role": infer_role(series)
         }
 
+        # --------------------------------------------------
         # Numeric column information
+        # --------------------------------------------------
+
         if col_info["role"] == "continuous":
 
             clean_series = series.dropna()
@@ -133,7 +158,10 @@ def profile_dataset(filepath):
                     )
                 })
 
+        # --------------------------------------------------
         # Categorical information
+        # --------------------------------------------------
+
         elif col_info["role"] == "categorical":
 
             value_counts = (
@@ -148,7 +176,10 @@ def profile_dataset(filepath):
                 for k, v in value_counts.items()
             }
 
+        # --------------------------------------------------
         # Date information
+        # --------------------------------------------------
+
         elif col_info["role"] == "time_index":
 
             converted = pd.to_datetime(
@@ -159,6 +190,7 @@ def profile_dataset(filepath):
             valid_dates = converted.dropna()
 
             if len(valid_dates) > 0:
+
                 col_info.update({
                     "min_date": str(valid_dates.min()),
                     "max_date": str(valid_dates.max())
@@ -171,7 +203,7 @@ def profile_dataset(filepath):
 
 if __name__ == "__main__":
 
-    # Your current dataset
+    # Current evaluation dataset
     filepath = "data/raw/sales.csv"
 
     result = profile_dataset(filepath)

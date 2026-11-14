@@ -1,0 +1,112 @@
+warning: in the working copy of 'src/main.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/src/main.py b/src/main.py[m
+[1mindex f9d2619..1fe7bab 100644[m
+[1m--- a/src/main.py[m
+[1m+++ b/src/main.py[m
+[36m@@ -2518,6 +2518,106 @@[m [mdef main(dataset_path=None, user_question=None, test_fault=False):[m
+         print("\nInsight Validation Result (using independent evidence):")[m
+         print_json(insight_validation)[m
+ [m
+[32m+[m[32m    # OPTIONAL OLLAMA INSIGHT REWRITING (validated candidate only)[m
+[32m+[m[32m    # Preserve the deterministic insight and its validation as fallbacks.[m
+[32m+[m[32m    original_insight = insight[m
+[32m+[m[32m    original_insight_validation = insight_validation[m
+[32m+[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        from ollama_insight_rewriter import rewrite_insight_with_ollama[m
+[32m+[m
+[32m+[m[32m        candidate_insight = rewrite_insight_with_ollama([m
+[32m+[m[32m            user_question=user_question,[m
+[32m+[m[32m            original_insight=original_insight,[m
+[32m+[m[32m            verified_results=primary_result,[m
+[32m+[m[32m            evidence=evidence,[m
+[32m+[m[32m        )[m
+[32m+[m
+[32m+[m[32m        if candidate_insight:[m
+[32m+[m[32m            candidate_validation_result = ([m
+[32m+[m[32m                evidence[m
+[32m+[m[32m                if str(analysis_type).lower() == "descriptive_summary"[m
+[32m+[m[32m                else validation_result_data[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            candidate_validation = validate_insight([m
+[32m+[m[32m                insight=candidate_insight,[m
+[32m+[m[32m                result=candidate_validation_result,[m
+[32m+[m[32m                analysis_type=analysis_type,[m
+[32m+[m[32m                task_analysis=task_analysis,[m
+[32m+[m[32m                user_question=user_question,[m
+[32m+[m[32m                data_profile=data_profile,[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            if ([m
+[32m+[m[32m                isinstance(primary_result, dict)[m
+[32m+[m[32m                and str(primary_result.get("analysis_type", "")).lower()[m
+[32m+[m[32m                == "multi_metric_grouped_mean_analysis"[m
+[32m+[m[32m            ):[m
+[32m+[m[32m                candidate_validation = ([m
+[32m+[m[32m                    validate_multi_metric_grouped_mean_insight([m
+[32m+[m[32m                        insight=candidate_insight,[m
+[32m+[m[32m                        combined_result=primary_result,[m
+[32m+[m[32m                        base_validation=candidate_validation,[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m            # For grouped means, also require the candidate to map to[m
+[32m+[m[32m            # the validated evidence before accepting an Ollama rewrite.[m
+[32m+[m[32m            candidate_mapping_passed = True[m
+[32m+[m
+[32m+[m[32m            if str(analysis_type).lower() == "grouped_mean_analysis":[m
+[32m+[m[32m                candidate_mapping = map_insight_to_evidence([m
+[32m+[m[32m                    candidate_insight,[m
+[32m+[m[32m                    evidence,[m
+[32m+[m[32m                )[m
+[32m+[m[32m                candidate_mapping_passed = ([m
+[32m+[m[32m                    isinstance(candidate_mapping, dict)[m
+[32m+[m[32m                    and candidate_mapping.get("status") == "PASS"[m
+[32m+[m[32m                )[m
+[32m+[m
+[32m+[m[32m                if not candidate_mapping_passed:[m
+[32m+[m[32m                    print([m
+[32m+[m[32m                        "Ollama insight rewrite: candidate failed "[m
+[32m+[m[32m                        "grouped-mean evidence mapping; retaining original."[m
+[32m+[m[32m                    )[m
+[32m+[m
+[32m+[m[32m            candidate_passed = ([m
+[32m+[m[32m                isinstance(candidate_validation, dict)[m
+[32m+[m[32m                and candidate_validation.get("overall") == "PASS"[m
+[32m+[m[32m                and candidate_validation.get("pass") is True[m
+[32m+[m[32m                and candidate_mapping_passed[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            if candidate_passed:[m
+[32m+[m[32m                insight = candidate_insight[m
+[32m+[m[32m                insight_validation = candidate_validation[m
+[32m+[m[32m                print([m
+[32m+[m[32m                    "Ollama insight rewrite: ACCEPTED "[m
+[32m+[m[32m                    "(existing validators passed)."[m
+[32m+[m[32m                )[m
+[32m+[m[32m            else:[m
+[32m+[m[32m                insight = original_insight[m
+[32m+[m[32m                insight_validation = original_insight_validation[m
+[32m+[m[32m                print([m
+[32m+[m[32m                    "Ollama insight rewrite: REJECTED "[m
+[32m+[m[32m                    "(validation failed); original insight retained."[m
+[32m+[m[32m                )[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            print([m
+[32m+[m[32m                "Ollama insight rewrite: SKIPPED; "[m
+[32m+[m[32m                "original insight retained."[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m    except Exception as exc:[m
+[32m+[m[32m        insight = original_insight[m
+[32m+[m[32m        insight_validation = original_insight_validation[m
+[32m+[m[32m        print([m
+[32m+[m[32m            "Ollama insight rewrite: SKIPPED due to an error; "[m
+[32m+[m[32m            "original insight retained. "[m
+[32m+[m[32m            f"Details: {exc}"[m
+[32m+[m[32m        )[m
+[32m+[m
+     print([m
+         "Evidence:"[m
+     )[m

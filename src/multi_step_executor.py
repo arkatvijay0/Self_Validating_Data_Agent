@@ -257,7 +257,8 @@ def create_self_correcting_executor(
     data_profile=None,
     dataset_columns=None,
     target_columns=None,
-    test_fault=False
+    test_fault=False,
+    analytical_spec=None
 ):
     """
     Create an executor function that automatically
@@ -300,7 +301,8 @@ def create_self_correcting_executor(
             data_profile=data_profile,
             dataset_columns=dataset_columns,
             target_columns=target_columns,
-            test_fault=test_fault
+            test_fault=test_fault,
+            analytical_spec=analytical_spec
         )
 
     return step_executor

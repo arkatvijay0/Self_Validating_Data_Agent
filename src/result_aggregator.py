@@ -21,27 +21,17 @@ from typing import Any, Dict, List, Optional
 # ============================================================
 
 def get_step_status(step: Dict[str, Any]) -> str:
-    """
-    Safely extract the final status of an executed step.
-    """
-
-    return str(
-        step.get("status", "")
-    ).upper()
+    """Safely extract the final status of an executed step."""
+    return str(step.get("status", "")).upper()
 
 
 def is_successful_step(step: Dict[str, Any]) -> bool:
-    """
-    Check whether a step passed self-validation.
-    """
-
+    """Check whether a step passed self-validation."""
     return get_step_status(step) == "PASS"
 
 
 def get_step_result(step: Dict[str, Any]) -> Any:
-    """
-    Extract the final validated result from a step.
-    """
+    """Extract the final validated result from a step."""
 
     if "final_result" in step:
         return step["final_result"]
@@ -55,9 +45,7 @@ def get_step_result(step: Dict[str, Any]) -> Any:
 
 
 def get_step_validation(step: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract final validation information.
-    """
+    """Extract final validation information."""
 
     validation = step.get("final_validation")
 
@@ -68,9 +56,7 @@ def get_step_validation(step: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_step_attempts(step: Dict[str, Any]) -> int:
-    """
-    Extract number of execution attempts.
-    """
+    """Extract number of execution attempts."""
 
     attempts = step.get("total_attempts")
 
@@ -210,7 +196,6 @@ def select_primary_result(
 
     if analysis_type == "comparison":
 
-
         # Prefer a valid grouped-mean result over a generic overall mean.
         for step in reversed(successful_steps):
             result = get_step_result(step)
@@ -228,10 +213,7 @@ def select_primary_result(
         # Prefer a step explicitly identifying the highest category.
         for step in reversed(successful_steps):
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
-
+            step_text = str(step.get("step", "")).lower()
             result = get_step_result(step)
 
             if (
@@ -243,10 +225,7 @@ def select_primary_result(
         # Next preference: ranking result.
         for step in reversed(successful_steps):
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
-
+            step_text = str(step.get("step", "")).lower()
             result = get_step_result(step)
 
             if (
@@ -267,10 +246,7 @@ def select_primary_result(
         # Prefer Pearson correlation.
         for step in successful_steps:
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
-
+            step_text = str(step.get("step", "")).lower()
             result = get_step_result(step)
 
             if (
@@ -282,10 +258,7 @@ def select_primary_result(
         # Then Spearman.
         for step in successful_steps:
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
-
+            step_text = str(step.get("step", "")).lower()
             result = get_step_result(step)
 
             if (
@@ -297,9 +270,7 @@ def select_primary_result(
         # Generic correlation fallback.
         for step in successful_steps:
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
+            step_text = str(step.get("step", "")).lower()
 
             if (
                 "correlation" in step_text
@@ -317,9 +288,7 @@ def select_primary_result(
 
         for step in reversed(successful_steps):
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
+            step_text = str(step.get("step", "")).lower()
 
             if any(
                 keyword in step_text
@@ -342,6 +311,7 @@ def select_primary_result(
 
         # Prefer Isolation Forest when a successful step identifies it.
         for step in reversed(successful_steps):
+
             step_text = str(step.get("step", "")).lower()
             result = get_step_result(step)
 
@@ -361,6 +331,7 @@ def select_primary_result(
 
         # Preserve existing behavior for other outlier requests.
         for step in reversed(successful_steps):
+
             step_text = str(step.get("step", "")).lower()
 
             if any(
@@ -379,9 +350,7 @@ def select_primary_result(
 
         for step in successful_steps:
 
-            step_text = str(
-                step.get("step", "")
-            ).lower()
+            step_text = str(step.get("step", "")).lower()
 
             if (
                 "mean" in step_text
@@ -395,6 +364,75 @@ def select_primary_result(
     # Descriptive Analysis
     # --------------------------------------------------------
 
+    # Prefer the most comprehensive independently validated
+    # specification-driven result.
+    #
+    # For multi-operation requests (for example, median AND standard
+    # deviation across several metrics), the final independent-
+    # recomputation step contains the complete aggregation mapping.
+    #
+    # Individual execution steps may contain only one operation.
+    descriptive_candidates = []
+
+    for position, step in enumerate(successful_steps):
+
+        # successful_steps already contains only steps whose final
+        # execution status is PASS.
+        #
+        # Some executor records do not expose final_validation at the
+        # top level, even though self-validation passed and the step
+        # status is PASS.
+        #
+        # Do not reject valid results because that optional metadata
+        # field is absent.
+
+        result = get_step_result(step)
+
+        if not isinstance(result, dict):
+            continue
+
+        if str(result.get("status", "")).upper() != "PASS":
+            continue
+
+        if result.get("analysis_type") != "specification_driven":
+            continue
+
+        operation_results = result.get("operation_results")
+
+        if not isinstance(operation_results, dict):
+            continue
+
+        aggregations = operation_results.get("aggregations")
+
+        if not isinstance(aggregations, dict) or not aggregations:
+            continue
+
+        operations = result.get("operations")
+
+        if not isinstance(operations, list) or not operations:
+            continue
+
+        descriptive_candidates.append(
+            (
+                len(operations),
+                len(aggregations),
+                position,
+                step
+            )
+        )
+
+    if descriptive_candidates:
+
+        # Prefer more requested operations, then more metric-operation
+        # values, and finally the later validated result as a tie-breaker.
+        descriptive_candidates.sort(
+            key=lambda item: (item[0], item[1], item[2])
+        )
+
+        return descriptive_candidates[-1][3]
+
+    # Preserve the previous fallback for descriptive tasks whose
+    # results do not use the specification-driven aggregation schema.
     return successful_steps[0]
 
 
@@ -406,15 +444,12 @@ def select_supporting_results(
     successful_steps: List[Dict[str, Any]],
     primary_step: Optional[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """
-    Select all successful steps other than the primary result.
-    """
+    """Select all successful steps other than the primary result."""
 
     if primary_step is None:
         return successful_steps.copy()
 
     primary_id = id(primary_step)
-
     supporting = []
 
     for step in successful_steps:
@@ -432,16 +467,13 @@ def select_supporting_results(
 def create_step_summary(
     all_steps: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """
-    Create a compact summary for every executed step.
-    """
+    """Create a compact summary for every executed step."""
 
     summary = []
 
     for index, step in enumerate(all_steps, start=1):
 
         status = get_step_status(step)
-
         validation = get_step_validation(step)
 
         final_validation_status = str(
@@ -450,20 +482,12 @@ def create_step_summary(
 
         summary.append(
             {
-                "step_number": step.get(
-                    "step_number",
-                    index
-                ),
-                "step": step.get(
-                    "step",
-                    ""
-                ),
+                "step_number": step.get("step_number", index),
+                "step": step.get("step", ""),
                 "status": status,
                 "validation": final_validation_status,
                 "attempts": get_step_attempts(step),
-                "has_result": (
-                    get_step_result(step) is not None
-                )
+                "has_result": get_step_result(step) is not None
             }
         )
 
@@ -477,9 +501,7 @@ def create_step_summary(
 def calculate_reliability_metrics(
     all_steps: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """
-    Calculate execution reliability metrics.
-    """
+    """Calculate execution reliability metrics."""
 
     total_steps = len(all_steps)
 
@@ -526,18 +548,9 @@ def calculate_reliability_metrics(
         "failed_steps": failed_steps,
         "total_attempts": total_attempts,
         "correction_steps": correction_steps,
-        "success_rate": round(
-            success_rate,
-            2
-        ),
-        "correction_rate": round(
-            correction_rate,
-            2
-        ),
-        "average_attempts": round(
-            average_attempts,
-            2
-        )
+        "success_rate": round(success_rate, 2),
+        "correction_rate": round(correction_rate, 2),
+        "average_attempts": round(average_attempts, 2)
     }
 
 
@@ -586,22 +599,17 @@ def aggregate_results(
         primary_step=primary_step
     )
 
-    reliability = calculate_reliability_metrics(
-        all_steps
-    )
+    reliability = calculate_reliability_metrics(all_steps)
+    step_summary = create_step_summary(all_steps)
 
-    step_summary = create_step_summary(
-        all_steps
-    )
-
+    # Keep strict failure handling:
+    # if even one planned step fails, overall aggregation fails.
     overall_status = (
         "PASS"
         if (
             all_steps
-            and
-            len(successful_steps) == len(all_steps)
-            and
-            primary_step is not None
+            and len(successful_steps) == len(all_steps)
+            and primary_step is not None
         )
         else "FAIL"
     )
@@ -617,15 +625,9 @@ def aggregate_results(
 
         "primary_step": (
             {
-                "step_number": primary_step.get(
-                    "step_number"
-                ),
-                "step": primary_step.get(
-                    "step"
-                ),
-                "attempts": get_step_attempts(
-                    primary_step
-                )
+                "step_number": primary_step.get("step_number"),
+                "step": primary_step.get("step"),
+                "attempts": get_step_attempts(primary_step)
             }
             if primary_step
             else None
@@ -633,25 +635,15 @@ def aggregate_results(
 
         "supporting_results": [
             {
-                "step_number": step.get(
-                    "step_number"
-                ),
-                "step": step.get(
-                    "step"
-                ),
-                "result": get_step_result(
-                    step
-                ),
-                "attempts": get_step_attempts(
-                    step
-                )
+                "step_number": step.get("step_number"),
+                "step": step.get("step"),
+                "result": get_step_result(step),
+                "attempts": get_step_attempts(step)
             }
             for step in supporting_steps
         ],
 
-        "validated_steps": len(
-            successful_steps
-        ),
+        "validated_steps": len(successful_steps),
 
         "step_summary": step_summary,
 
@@ -668,68 +660,31 @@ def aggregate_results(
 def print_aggregation_summary(
     aggregation: Dict[str, Any]
 ) -> None:
-    """
-    Print a readable aggregation summary.
-    """
+    """Print a readable aggregation summary."""
 
     print("\n")
     print("#" * 70)
     print("MULTI-STEP RESULT AGGREGATION SUMMARY")
     print("#" * 70)
 
-    print(
-        "\nAnalysis Type:"
-    )
-    print(
-        aggregation.get(
-            "analysis_type"
-        )
-    )
+    print("\nAnalysis Type:")
+    print(aggregation.get("analysis_type"))
 
-    print(
-        "\nOverall Status:"
-    )
-    print(
-        aggregation.get(
-            "overall_status"
-        )
-    )
+    print("\nOverall Status:")
+    print(aggregation.get("overall_status"))
 
-    print(
-        "\nValidated Steps:"
-    )
-    print(
-        aggregation.get(
-            "validated_steps"
-        )
-    )
+    print("\nValidated Steps:")
+    print(aggregation.get("validated_steps"))
 
-    print(
-        "\nPrimary Step:"
-    )
-    print(
-        aggregation.get(
-            "primary_step"
-        )
-    )
+    print("\nPrimary Step:")
+    print(aggregation.get("primary_step"))
 
-    print(
-        "\nPrimary Result:"
-    )
-    print(
-        aggregation.get(
-            "primary_result"
-        )
-    )
+    print("\nPrimary Result:")
+    print(aggregation.get("primary_result"))
 
-    print(
-        "\nSupporting Results:"
-    )
+    print("\nSupporting Results:")
 
-    supporting = aggregation.get(
-        "supporting_results",
-        []
-    )
+    supporting = aggregation.get("supporting_results", [])
 
     for item in supporting:
 
@@ -738,29 +693,16 @@ def print_aggregation_summary(
             f"{item.get('step')}"
         )
 
-    print(
-        "\nReliability:"
-    )
+    print("\nReliability:")
 
-    reliability = aggregation.get(
-        "reliability",
-        {}
-    )
+    reliability = aggregation.get("reliability", {})
 
     for key, value in reliability.items():
+        print(f"{key}: {value}")
 
-        print(
-            f"{key}: {value}"
-        )
+    print("\nStep Summary:")
 
-    print(
-        "\nStep Summary:"
-    )
-
-    for item in aggregation.get(
-        "step_summary",
-        []
-    ):
+    for item in aggregation.get("step_summary", []):
 
         print(
             f"Step {item.get('step_number')}: "
@@ -896,9 +838,7 @@ if __name__ == "__main__":
         task_analysis=task_analysis
     )
 
-    print_aggregation_summary(
-        aggregation
-    )
+    print_aggregation_summary(aggregation)
 
     # --------------------------------------------------------
     # TEST 1
@@ -906,14 +846,10 @@ if __name__ == "__main__":
 
     test_1_pass = (
         aggregation["overall_status"] == "PASS"
-        and
-        aggregation["analysis_type"] == "comparison"
-        and
-        aggregation["validated_steps"] == 5
-        and
-        aggregation["primary_step"]["step_number"] == 5
-        and
-        aggregation["primary_result"]["Region"]
+        and aggregation["analysis_type"] == "comparison"
+        and aggregation["validated_steps"] == 5
+        and aggregation["primary_step"]["step_number"] == 5
+        and aggregation["primary_result"]["Region"]
         == "Sub-Saharan Africa"
     )
 
@@ -994,26 +930,17 @@ if __name__ == "__main__":
     )
 
     relationship_test_pass = (
-        relationship_aggregation["overall_status"]
-        == "PASS"
-        and
-        relationship_aggregation["analysis_type"]
+        relationship_aggregation["overall_status"] == "PASS"
+        and relationship_aggregation["analysis_type"]
         == "relationship_analysis"
-        and
-        relationship_aggregation["primary_step"]
-        ["step_number"] == 1
-        and
-        relationship_aggregation
-        ["primary_result"]
-        ["correlation"]
+        and relationship_aggregation["primary_step"]["step_number"] == 1
+        and relationship_aggregation["primary_result"]["correlation"]
         == 0.5645504620845976
     )
 
     print(
         "\nTEST 2 RESULT:",
-        "PASS"
-        if relationship_test_pass
-        else "FAIL"
+        "PASS" if relationship_test_pass else "FAIL"
     )
 
     # --------------------------------------------------------
@@ -1041,23 +968,99 @@ if __name__ == "__main__":
     )
 
     test_3_pass = (
-        failed_aggregation["overall_status"]
-        == "FAIL"
-        and
-        failed_aggregation["reliability"]
-        ["failed_steps"]
-        == 1
-        and
-        failed_aggregation["reliability"]
-        ["successful_steps"]
-        == 1
+        failed_aggregation["overall_status"] == "FAIL"
+        and failed_aggregation["reliability"]["failed_steps"] == 1
+        and failed_aggregation["reliability"]["successful_steps"] == 1
     )
 
     print(
         "\nTEST 3 RESULT:",
-        "PASS"
-        if test_3_pass
-        else "FAIL"
+        "PASS" if test_3_pass else "FAIL"
+    )
+
+    # --------------------------------------------------------
+    # TEST 4: MULTI-OPERATION DESCRIPTIVE AGGREGATION
+    # --------------------------------------------------------
+
+    descriptive_steps = []
+
+    operations_by_step = [
+        ["median"],
+        ["median"],
+        ["median"],
+        ["std"],
+        ["std"],
+        ["std"],
+        ["median", "std"]
+    ]
+
+    for index, operations in enumerate(operations_by_step, start=1):
+
+        aggregations = {}
+
+        for metric in [
+            "Total_Purchases",
+            "Total_Spend",
+            "Age"
+        ]:
+
+            for operation in operations:
+
+                aggregations[f"{metric}__{operation}"] = 1.0
+
+        descriptive_steps.append(
+            {
+                "step_number": index,
+                "step": (
+                    "Independently recompute requested operations"
+                    if index == 7
+                    else f"Calculate {operations[0]}"
+                ),
+                "status": "PASS",
+                "total_attempts": 1,
+                "final_result": {
+                    "status": "PASS",
+                    "analysis_type": "specification_driven",
+                    "operations": operations,
+                    "metrics": [
+                        "Total_Purchases",
+                        "Total_Spend",
+                        "Age"
+                    ],
+                    "group_by": [],
+                    "filters_applied": [],
+                    "operation_results": {
+                        "aggregations": aggregations
+                    }
+                }
+            }
+        )
+
+    descriptive_aggregation = aggregate_results(
+        user_question=(
+            "Calculate the median and standard deviation of "
+            "Age, Total_Purchases, and Total_Spend."
+        ),
+        all_steps=descriptive_steps,
+        task_analysis={
+            "task_type": "descriptive_summary"
+        }
+    )
+
+    descriptive_primary = descriptive_aggregation["primary_result"]
+
+    descriptive_test_pass = (
+        descriptive_aggregation["overall_status"] == "PASS"
+        and descriptive_aggregation["primary_step"]["step_number"] == 7
+        and descriptive_primary["operations"] == ["median", "std"]
+        and len(
+            descriptive_primary["operation_results"]["aggregations"]
+        ) == 6
+    )
+
+    print(
+        "\nTEST 4 RESULT:",
+        "PASS" if descriptive_test_pass else "FAIL"
     )
 
     # --------------------------------------------------------
@@ -1067,7 +1070,8 @@ if __name__ == "__main__":
     tests = [
         test_1_pass,
         relationship_test_pass,
-        test_3_pass
+        test_3_pass,
+        descriptive_test_pass
     ]
 
     passed = sum(
@@ -1081,13 +1085,9 @@ if __name__ == "__main__":
     print("FINAL TEST SUMMARY")
     print("#" * 70)
 
-    print(
-        f"\nTests Passed: {passed}/{len(tests)}"
-    )
+    print(f"\nTests Passed: {passed}/{len(tests)}")
 
     print(
         "OVERALL RESULT:",
-        "PASS"
-        if passed == len(tests)
-        else "FAIL"
+        "PASS" if passed == len(tests) else "FAIL"
     )

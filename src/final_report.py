@@ -72,6 +72,123 @@ def get_validation_status(validation):
 # CREATE FINAL REPORT
 # ==========================================================
 
+
+def _group_label(row, group_columns):
+    values = [row.get(column) for column in group_columns]
+    if len(group_columns) == 1:
+        return f"{group_columns[0]}={values[0]}"
+    return ", ".join(f"{column}={value}" for column, value in zip(group_columns, values))
+
+
+def render_result_table(validated_result, max_rows=30):
+    """
+    Readable, sorted table for grouped results (highest first) with group sizes.
+    Presentation only: it reads the validated result and changes nothing in it.
+    """
+    if not isinstance(validated_result, dict):
+        return []
+    groups = [str(g) for g in (validated_result.get("group_by") or [])]
+    results = validated_result.get("operation_results")
+    rows = results.get("aggregations") if isinstance(results, dict) else None
+    if not groups or not isinstance(rows, list) or not rows:
+        return []
+
+    value_keys = [
+        key for key in rows[0]
+        if key not in groups and (key.endswith(("__mean", "__median", "__sum", "__min", "__max",
+                                                "__std", "__variance", "__count", "__nunique"))
+                                  or key == "row_count")
+    ]
+    if not value_keys:
+        return []
+    value_key = value_keys[0]
+    sizes = {}
+    for size_row in (results.get("group_sizes") or []):
+        if isinstance(size_row, dict) and all(g in size_row for g in groups):
+            sizes[tuple(str(size_row[g]) for g in groups)] = size_row.get("row_count")
+
+    table = []
+    for row in rows:
+        value = row.get(value_key)
+        if not isinstance(value, (int, float)):
+            return []
+        table.append((_group_label(row, groups), float(value), sizes.get(tuple(str(row[g]) for g in groups))))
+    table.sort(key=lambda item: -item[1])
+
+    is_count = value_key.endswith(("__count", "__nunique")) or value_key == "row_count"
+    fmt = (lambda v: f"{int(round(v)):,}") if is_count else (lambda v: f"{v:,.2f}")
+    has_sizes = any(item[2] is not None for item in table)
+    shown = table
+    note = ""
+    if len(table) > max_rows:
+        shown = table[:15] + [None] + table[-5:]
+        note = f"{len(table)} groups in total; showing the 15 highest and 5 lowest."
+    width = max(len(item[0]) for item in table if item is not None)
+    lines = [f"RESULT TABLE ({value_key.replace('__', ' ')}, highest first)", "-" * 60]
+    header = f"{'rank':>4}  {'group':<{width}}  {'value':>14}"
+    header += f"  {'records':>9}" if has_sizes else ""
+    lines.append(header)
+    rank = 0
+    for item in shown:
+        if item is None:
+            lines.append("  ...")
+            rank = len(table) - 5
+            continue
+        rank += 1
+        line = f"{rank:>4}  {item[0]:<{width}}  {fmt(item[1]):>14}"
+        if has_sizes:
+            line += f"  {(f'{int(item[2]):,}' if item[2] is not None else '-'):>9}"
+        lines.append(line)
+    if note:
+        lines.append(note)
+    return lines
+
+
+def compact_result_for_display(result, max_rows=12):
+    """
+    Large grouped results are shown as a sorted RESULT TABLE; the raw row dump in
+    section 3 then keeps only the first rows. Display only: the validated result
+    itself is untouched.
+    """
+    if not isinstance(result, dict) or not render_result_table(result):
+        return result
+    operation_results = result.get("operation_results")
+    rows = operation_results.get("aggregations") if isinstance(operation_results, dict) else None
+    if not isinstance(rows, list) or len(rows) <= max_rows:
+        return result
+    compact = {k: v for k, v in operation_results.items() if k != "group_sizes"}
+    compact["aggregations"] = rows[:5] + [f"... {len(rows) - 5} more groups: see the RESULT TABLE below"]
+    shown = dict(result)
+    shown["operation_results"] = compact
+    return shown
+
+
+def render_dataset_overview(overview):
+    if not isinstance(overview, dict) or not overview:
+        return []
+    lines = ["DATASET OVERVIEW", "-" * 60]
+    for label, key in (("File", "file"), ("Rows", "rows"), ("Columns", "columns"),
+                       ("Missing cells", "missing_cells"), ("Column types", "column_types"),
+                       ("Identifier columns", "identifier_columns")):
+        if overview.get(key) not in (None, "", []):
+            value = overview[key]
+            lines.append(f"{label}: {value:,}" if isinstance(value, int) else f"{label}: {value}")
+    lines.append("")
+    return lines
+
+
+def render_pipeline_trace(trace):
+    """What actually happened in THIS run, stage by stage."""
+    lines = []
+    for index, item in enumerate(trace, start=1):
+        stage, status, detail = item
+        lines.append(f"{index:>2}. {stage}")
+        lines.append(f"      Status : {status}")
+        if detail:
+            lines.append(f"      Detail : {detail}")
+    return lines
+
+
 def create_final_report(
     user_question,
     analysis_type,
@@ -80,7 +197,9 @@ def create_final_report(
     insight_validation,
     evidence,
     recommendation,
-    insight_evidence_mapping=None
+    insight_evidence_mapping=None,
+    recommendation_validation=None,
+    report_extras=None
 ):
     """
     Create the final Self-Validating EDA Agent report.
@@ -119,6 +238,12 @@ def create_final_report(
             "%Y-%m-%d %H:%M:%S"
         )
     )
+
+    report_extras = report_extras if isinstance(report_extras, dict) else {}
+    overview_lines = render_dataset_overview(report_extras.get("dataset_overview"))
+    if overview_lines:
+        report_lines.append("")
+        report_lines.extend(overview_lines)
 
     report_lines.append("")
 
@@ -175,7 +300,7 @@ def create_final_report(
         dict
     ):
 
-        for key, value in validated_result.items():
+        for key, value in compact_result_for_display(validated_result).items():
 
             report_lines.append(
                 f"{key}: {format_value(value)}"
@@ -206,6 +331,11 @@ def create_final_report(
     )
 
     report_lines.append("")
+
+    table_lines = render_result_table(validated_result)
+    if table_lines:
+        report_lines.extend(table_lines)
+        report_lines.append("")
 
     # ======================================================
     # 5. INSIGHT VALIDATION
@@ -275,9 +405,18 @@ def create_final_report(
             {}
         )
 
-        # Support both the legacy validation schema and the current
-        # multi-metric claim-validation schema.
+        # Support the legacy, multi-metric, and specification-driven
+        # grouped-mean validation schemas.
         multi_metric_check = checks.get("multi_metric_claim_validation")
+        specification_grouped_mean_keys = {
+            "result_status",
+            "metric_mentioned",
+            "all_grouping_columns_mentioned",
+            "all_composite_group_labels_mentioned",
+            "all_group_means_mentioned",
+            "each_group_mean_paired_with_correct_label",
+        }
+
         if isinstance(multi_metric_check, dict):
             metric_checks = multi_metric_check.get("metrics", {})
             if not isinstance(metric_checks, dict):
@@ -294,6 +433,32 @@ def create_final_report(
             # The multi-metric validator's pass flag reflects the full set of
             # metric claims, including whether the values/differences validate.
             result_pass = multi_metric_check.get("pass") is True
+
+        elif specification_grouped_mean_keys.issubset(checks.keys()):
+            # The specification-driven grouped-mean validator reports its
+            # checks directly under checks, rather than under legacy
+            # presence/result dictionaries.
+            presence_pass = all(
+                checks.get(key) is True
+                for key in (
+                    "metric_mentioned",
+                    "all_grouping_columns_mentioned",
+                    "all_composite_group_labels_mentioned",
+                )
+            )
+
+            # A result passes only when the source result is valid, all
+            # expected means are stated, and every mean is paired with its
+            # correct composite group label.
+            result_pass = all(
+                checks.get(key) is True
+                for key in (
+                    "result_status",
+                    "all_group_means_mentioned",
+                    "each_group_mean_paired_with_correct_label",
+                )
+            )
+
         else:
             presence = checks.get("presence", {})
             result_check = checks.get("result", {})
@@ -459,6 +624,17 @@ def create_final_report(
             "evidence_summary"
         )
 
+        # The summary repeats the evidence printed just above; skip exact duplicates.
+        if evidence_summary and evidence_result is not None:
+            try:
+                import json as _json
+                if _json.loads(str(evidence_summary)) == _json.loads(
+                    _json.dumps(evidence_result, default=str)
+                ):
+                    evidence_summary = None
+            except (ValueError, TypeError):
+                pass
+
         if evidence_summary:
 
             report_lines.append("")
@@ -559,10 +735,34 @@ def create_final_report(
         # A non-empty plain-text recommendation was generated successfully.
         recommendation_status = "PASS"
 
+    independent_recommendation_validation = (
+        recommendation_validation
+        if isinstance(recommendation_validation, dict)
+        else (
+            insight_evidence_mapping.get("recommendation_validation", {})
+            if isinstance(insight_evidence_mapping, dict) else {}
+        )
+    )
+    independent_recommendation_status = str(
+        independent_recommendation_validation.get("status", "")
+    ).upper()
+
+    if independent_recommendation_status in {"FAIL", "REVIEW"}:
+        recommendation_status = independent_recommendation_status
+
     report_lines.append(
         f"Recommendation Status: "
         f"{recommendation_status}"
     )
+
+    if independent_recommendation_validation:
+        report_lines.append(
+            "Independent Recommendation Validation: "
+            + independent_recommendation_status
+        )
+        report_lines.append(
+            format_value(independent_recommendation_validation)
+        )
 
     report_lines.append("")
 
@@ -647,9 +847,11 @@ def create_final_report(
 
         overall_reliability = "FAIL"
 
-    if recommendation_status != "PASS":
+    if recommendation_status == "FAIL":
 
         overall_reliability = "FAIL"
+    elif recommendation_status == "REVIEW" and overall_reliability == "PASS":
+        overall_reliability = "REVIEW"
 
     # An unsupported original user claim is reported separately. It should not
     # invalidate an otherwise correct analysis and evidence-backed generated insight.
@@ -662,14 +864,34 @@ def create_final_report(
 
     report_lines.append("")
 
+    traceability_status_for_report = str(
+        mapping_for_reliability.get("traceability_status", "REVIEW")
+    ).strip().upper()
+
+    if traceability_status_for_report == "PASS":
+        traceability_explanation = (
+          "Traceability PASS indicates that explicit source references "
+          "are available for the mapped evidence."
+        )
+    elif traceability_status_for_report == "REVIEW":
+        traceability_explanation = (
+         "Traceability REVIEW indicates that explicit source references "
+         "may be incomplete; review the evidence mapping before relying "
+         "on full source-level traceability."
+        )
+    else:
+        traceability_explanation = (
+            f"Traceability status is {traceability_status_for_report or 'UNAVAILABLE'}; "
+            "inspect the evidence mapping to determine whether source references "
+            "are available."
+        )
+
     report_lines.append(
-        "Overall reliability is marked PASS when the generated insight, evidence, "
-        "recommendation, applicable claim-level checks, and insight mapping pass. "
-        "The user's original directional claim is reported separately and does not "
-        "by itself invalidate an otherwise correct analysis. "
-        "Traceability REVIEW indicates missing explicit source references; "
-        "it remains visible as a limitation but does not by itself invalidate "
-        "a numerically validated result."
+         "Overall reliability is marked PASS when the generated insight, evidence, "
+         "recommendation, applicable claim-level checks, and insight mapping pass. "
+         "The user's original directional claim is reported separately and does not "
+         "by itself invalidate an otherwise correct analysis. "
+          + traceability_explanation
     )
 
     report_lines.append("")
@@ -688,49 +910,74 @@ def create_final_report(
 
     pipeline = [
         "User Question",
-        "      ↓",
+        "      |",
+        "      v",
         "Data Profiling",
-        "      ↓",
+        "      |",
+        "      v",
         "Task Analysis",
-        "      ↓",
+        "      |",
+        "      v",
         "EDA Planning",
-        "      ↓",
+        "      |",
+        "      v",
         "Code Generation",
-        "      ↓",
+        "      |",
+        "      v",
         "Code Execution",
-        "      ↓",
+        "      |",
+        "      v",
         "Code Validation",
-        "      ↓",
+        "      |",
+        "      v",
         "Data Usage Validation",
-        "      ↓",
+        "      |",
+        "      v",
         "Result Validation",
-        "      ↓",
+        "      |",
+        "      v",
         "PASS?",
-        "   ↙       ↘",
+        "   /       \\",
         " YES       NO",
-        " ↓          ↓",
+        "  |         |",
+        "  v         v",
         "Continue   Correction Feedback",
-        "             ↓",
+        "             |",
+        "             v",
         "        Regenerate Code",
-        "             ↓",
+        "             |",
+        "             v",
         "           Retry",
-        "             ↓",
+        "             |",
+        "             v",
         "Validated EDA Result",
-        "      ↓",
+        "      |",
+        "      v",
         "Insight Generation",
-        "      ↓",
+        "      |",
+        "      v",
         "Insight Validation",
-        "      ↓",
+        "      |",
+        "      v",
         "Evidence Mapping",
-        "      ↓",
+        "      |",
+        "      v",
         "Recommendation",
-        "      ↓",
+        "      |",
+        "      v",
+        "Independent Recommendation Validation",
+        "      |",
+        "      v",
         "Final Report"
     ]
 
-    report_lines.extend(
-        pipeline
-    )
+    trace = report_extras.get("pipeline_trace")
+    if trace:
+        report_lines.extend(render_pipeline_trace(trace))
+    else:
+        report_lines.extend(
+            pipeline
+        )
 
     report_lines.append("")
 

@@ -1,0 +1,37 @@
+[1mdiff --git a/src/insight_validator.py b/src/insight_validator.py[m
+[1mindex 1823bab..857ea1b 100644[m
+[1m--- a/src/insight_validator.py[m
+[1m+++ b/src/insight_validator.py[m
+[36m@@ -1002,23 +1002,25 @@[m [mdef validate_grouped_mean_direction_claims(insight, result, user_question=None):[m
+         else "NOT_ASSESSED"[m
+     )[m
+     return {[m
+[31m-        # Keep the legacy combined verdict for callers/tests that expect an[m
+[31m-        # unsupported user claim to make this validation fail, while exposing[m
+[31m-        # the generated insight's accuracy independently for validate_insight.[m
+[31m-        "pass": not insight_failures and not user_failures,[m
+[31m-        "overall": "PASS" if not insight_failures and not user_failures else "FAIL",[m
+[32m+[m[32m        # The overall verdict reflects whether the generated insight is accurate.[m
+[32m+[m[32m        # The user's claim is reported separately and may be NOT_SUPPORTED[m
+[32m+[m[32m        # without making an accurate, evidence-grounded insight fail.[m
+[32m+[m[32m        "pass": not insight_failures,[m
+[32m+[m[32m        "overall": "PASS" if not insight_failures else "FAIL",[m
+         "checks": insight_checks + user_checks,[m
+         "insight_checks": insight_checks,[m
+         "insight_pass": not insight_failures,[m
+         "insight_overall": "PASS" if not insight_failures else "FAIL",[m
+         "reason": "; ".join([m
+[31m-            item.get("reason", "") for item in insight_failures + user_failures[m
+[32m+[m[32m            item.get("reason", "") for item in insight_failures[m
+         ) or None,[m
+         "user_claim_validation": {[m
+             "status": user_status,[m
+             "pass": not user_failures if user_checks else None,[m
+             "checks": user_checks,[m
+[31m-            "reason": "; ".join(item.get("reason", "") for item in user_failures) or None,[m
+[32m+[m[32m            "reason": "; ".join([m
+[32m+[m[32m                item.get("reason", "") for item in user_failures[m
+[32m+[m[32m            ) or None,[m
+         },[m
+     }[m
+ [m

@@ -1,4 +1,5 @@
 import re
+import math
 
 
 # ==========================================================
@@ -137,7 +138,7 @@ def extract_anomaly_claims(insight):
 
     if match:
         claims["count"] = int(
-            match.group(1).replace(",", "")
+            match.group(1).replace(",", "").replace("$", "")
         )
 
     # ------------------------------------------------------
@@ -191,7 +192,7 @@ def extract_anomaly_claims(insight):
         )
 
         claims["max"] = float(
-            match.group(2).replace(",", "")
+            match.group(2).replace(",", "").replace("$", "")
         )
 
     # ------------------------------------------------------
@@ -227,10 +228,10 @@ def extract_anomaly_claims(insight):
     # ------------------------------------------------------
 
     match = re.search(
-        r"lower and upper boundaries were\s+"
-        r"([-+]?[\d,]+(?:\.\d+)?)"
-        r"\s+and\s+"
-        r"([-+]?[\d,]+(?:\.\d+)?)",
+        r"(?:lower and upper boundaries were|values below)\s+"
+        r"([-+]?\$?[\d,]+(?:\.\d+)?)"
+        r"(?:\s+and\s+|\s+or\s+above\s+)"
+        r"([-+]?\$?[\d,]+(?:\.\d+)?)",
         text,
         re.IGNORECASE
     )
@@ -249,16 +250,15 @@ def extract_anomaly_claims(insight):
     # ------------------------------------------------------
 
     match = re.search(
-        r"identified\s+([\d,]+)"
-        r"\s+potential Total Profit outliers",
+        r"(?:identified\s+([\d,]+)\s+potential\s+Total Profit outliers|"
+        r"([\d,]+)\s+outliers?\s+(?:were\s+)?identified)",
         text,
         re.IGNORECASE
     )
 
     if match:
-        claims["outlier_count"] = int(
-            match.group(1).replace(",", "")
-        )
+        count_text = match.group(1) or match.group(2)
+        claims["outlier_count"] = int(count_text.replace(",", ""))
 
     # ------------------------------------------------------
     # Outlier range
@@ -342,7 +342,7 @@ def validate_anomaly_claims(
     if "count" in claims:
 
         actual_count = result.get(
-            "count"
+            "count", result.get("valid_value_count", result.get("row_count"))
         )
 
         checks.append(
@@ -474,8 +474,7 @@ def validate_anomaly_claims(
                 ==
                 int(
                     result.get(
-                        "outlier_count",
-                        -1
+                        "outlier_count", result.get("anomaly_count", -1)
                     )
                 )
             )
@@ -629,6 +628,248 @@ def validate_anomaly_claims(
         },
 
         "claims": claims
+    }
+
+
+
+# ==========================================================
+# ISOLATION FOREST CLAIM EXTRACTION AND VALIDATION
+# ==========================================================
+
+def extract_isolation_forest_claims(insight):
+    """
+    Extract only count and percentage claims that can be checked against
+    the compact Isolation Forest result returned by the step executor.
+    """
+    text = str(insight or "")
+    claims = {}
+
+    number = r"([\d,]+(?:\.\d+)?)"
+
+    patterns = {
+        "row_count": [
+            rf"(?:evaluated|processed|analysed|analyzed|examined)\s+{number}\s+(?:rows|records|observations)\b",
+            rf"{number}\s+(?:total\s+)?(?:rows|records|observations)\b",
+        ],
+        "anomaly_count": [
+            rf"(?:detected|identified|found|flagged)\s+{number}\s+(?:potential\s+)?(?:anomalies|anomalous\s+rows|outliers)\b",
+            rf"{number}\s+(?:potential\s+)?(?:anomalies|anomalous\s+rows|outliers)\b",
+        ],
+        "normal_count": [
+            rf"{number}\s+(?:normal\s+)?(?:rows|records|observations)\s+(?:were\s+)?(?:classified|labelled|labeled)\s+as\s+normal\b",
+            rf"{number}\s+normal\s+(?:rows|records|observations)\b",
+        ],
+    }
+
+    for key, candidates in patterns.items():
+        for pattern in candidates:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                raw = match.group(1).replace(",", "")
+                value = _safe_float(raw)
+                if value is not None and math.isfinite(value):
+                    claims[key] = value
+                break
+
+    # A percentage is captured only when its nearby wording identifies it
+    # as an anomaly/outlier percentage or rate.
+    for match in re.finditer(
+        rf"{number}\s*%",
+        text,
+        re.IGNORECASE,
+    ):
+        start, end = match.span()
+        context = text[max(0, start - 55):min(len(text), end + 35)].lower()
+        if any(term in context for term in ("anomal", "outlier")):
+            value = _safe_float(match.group(1).replace(",", ""))
+            if value is not None and math.isfinite(value):
+                claims["anomaly_percentage"] = value
+                break
+
+    return claims
+
+
+def validate_isolation_forest_claims(insight, result):
+    """
+    Validate Isolation Forest result integrity and any numeric claims made
+    by the insight. This intentionally does not apply IQR statistics or
+    infer that an anomaly is an error, fraud, or another specific cause.
+    """
+    failure = {
+        "overall": "FAIL",
+        "pass": False,
+        "total_claims": 0,
+        "passed_claims": 0,
+        "failed_claims": 0,
+    }
+
+    if not isinstance(result, dict):
+        return {
+            **failure,
+            "reason": "Isolation Forest result is not a dictionary.",
+            "checks": {},
+        }
+
+    method = str(result.get("method", "")).strip().lower()
+    normalized_method = re.sub(r"[\s_-]+", "", method)
+    if normalized_method != "isolationforest":
+        return {
+            **failure,
+            "reason": "Result method is not Isolation Forest.",
+            "checks": {"method": False},
+        }
+
+    def valid_count(value):
+        number_value = _safe_float(value)
+        if (
+            number_value is None
+            or not math.isfinite(number_value)
+            or number_value < 0
+            or not number_value.is_integer()
+        ):
+            return None
+        return int(number_value)
+
+    row_count = valid_count(result.get("row_count"))
+    anomaly_count = valid_count(result.get("anomaly_count"))
+    normal_count = valid_count(result.get("normal_count"))
+    anomaly_percentage = _safe_float(result.get("anomaly_percentage"))
+    feature_columns = result.get("feature_columns")
+    summary = result.get("summary")
+
+    checks = {
+        "method": True,
+        "result_status": str(result.get("status", "")).upper() == "PASS",
+        "row_count_valid": row_count is not None and row_count > 0,
+        "anomaly_count_valid": anomaly_count is not None,
+        "normal_count_valid": normal_count is not None,
+        "feature_columns_valid": (
+            isinstance(feature_columns, (list, tuple))
+            and len(feature_columns) > 0
+        ),
+        "anomaly_percentage_valid": (
+            anomaly_percentage is not None
+            and math.isfinite(anomaly_percentage)
+            and 0 <= anomaly_percentage <= 100
+        ),
+    }
+
+    counts_available = (
+        row_count is not None
+        and anomaly_count is not None
+        and normal_count is not None
+    )
+    checks["row_count_reconciles"] = (
+        counts_available
+        and row_count == anomaly_count + normal_count
+    )
+
+    if (
+        counts_available
+        and row_count is not None
+        and row_count > 0
+        and anomaly_percentage is not None
+        and math.isfinite(anomaly_percentage)
+    ):
+        expected_percentage = 100.0 * anomaly_count / row_count
+        checks["anomaly_percentage_reconciles"] = _approximately_equal(
+            anomaly_percentage,
+            expected_percentage,
+            absolute_tolerance=0.01,
+            relative_tolerance=0.0001,
+        )
+    else:
+        checks["anomaly_percentage_reconciles"] = False
+
+    # When the detector summary is present, verify that it agrees with the
+    # compact result rather than trusting two potentially conflicting copies.
+    if isinstance(summary, dict):
+        summary_total = summary.get("total_rows")
+        summary_anomalies = summary.get("anomaly_count")
+        summary_normals = summary.get("normal_count")
+        summary_percentage = summary.get("detected_anomaly_percentage")
+
+        if summary_total is not None:
+            checks["summary_total_matches"] = valid_count(summary_total) == row_count
+        if summary_anomalies is not None:
+            checks["summary_anomaly_count_matches"] = (
+                valid_count(summary_anomalies) == anomaly_count
+            )
+        if summary_normals is not None:
+            checks["summary_normal_count_matches"] = (
+                valid_count(summary_normals) == normal_count
+            )
+        if summary_percentage is not None:
+            parsed_summary_percentage = _safe_float(summary_percentage)
+            checks["summary_percentage_matches"] = (
+                parsed_summary_percentage is not None
+                and math.isfinite(parsed_summary_percentage)
+                and anomaly_percentage is not None
+                and _approximately_equal(
+                    parsed_summary_percentage,
+                    anomaly_percentage,
+                )
+            )
+
+    claims = extract_isolation_forest_claims(insight)
+    claim_checks = {}
+
+    expected_values = {
+        "row_count": row_count,
+        "anomaly_count": anomaly_count,
+        "normal_count": normal_count,
+        "anomaly_percentage": anomaly_percentage,
+    }
+    for key, claimed_value in claims.items():
+        actual_value = expected_values.get(key)
+        if actual_value is None:
+            claim_checks[key] = False
+        elif key in {"row_count", "anomaly_count", "normal_count"}:
+            claim_checks[key] = (
+                float(claimed_value).is_integer()
+                and int(claimed_value) == actual_value
+            )
+        else:
+            claim_checks[key] = _approximately_equal(
+                claimed_value,
+                actual_value,
+                absolute_tolerance=0.01,
+                relative_tolerance=0.0001,
+            )
+
+    # Require at least one verifiable numeric claim; otherwise a generic
+    # sentence could pass without communicating validated anomaly results.
+    checks["numeric_claim_present"] = bool(claim_checks)
+    checks.update({
+        f"claim_{key}": status
+        for key, status in claim_checks.items()
+    })
+
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    passed_checks = len(checks) - len(failed_checks)
+    overall_pass = bool(checks) and not failed_checks
+
+    return {
+        "overall": "PASS" if overall_pass else "FAIL",
+        "pass": overall_pass,
+        "total_claims": len(checks),
+        "passed_claims": passed_checks,
+        "failed_claims": len(failed_checks),
+        "checks": checks,
+        "claims": claims,
+        "validated_values": {
+            "row_count": row_count,
+            "anomaly_count": anomaly_count,
+            "normal_count": normal_count,
+            "anomaly_percentage": anomaly_percentage,
+            "feature_columns": list(feature_columns)
+            if isinstance(feature_columns, (list, tuple))
+            else [],
+        },
+        "reason": None if overall_pass else (
+            "Isolation Forest result integrity or one or more numeric "
+            "insight claims failed deterministic validation."
+        ),
     }
 
 
@@ -1380,8 +1621,8 @@ def validate_question_relevance(
             # "customers" often identifies the population, not the requested metric.
             # Require it in the answer only when the question asks for a customer count.
             asks_customer_count = bool(re.search(
-                r"\\b(count|number|how many|total number|customer count|"
-                r"number of customers|count of customers)\\b",
+                r"\b(count|number|how many|total number|customer count|"
+                r"number of customers|count of customers)\b",
                 question,
             ))
             if not asks_customer_count:
@@ -1484,17 +1725,55 @@ def validate_conversion_insight(insight, result):
 # DESCRIPTIVE SUMMARY VALIDATION
 # ==========================================================
 
+
 def validate_descriptive_summary_claims(insight, result):
     """
-    Validate dataset-size and data-quality claims against independent evidence.
-    This is deliberately conservative: it validates claims we can verify from
-    dataset_facts and does not treat generic presence checks as factual proof.
+    Validate dataset-level descriptive claims against independent evidence.
+
+    Statistical claims such as mean, median, and standard deviation are
+    handled by dedicated result and evidence validators. They should not
+    fail this dataset-facts validation when no dataset-level claims exist.
     """
+    text = str(insight or "")
+
+    # Identify claims that require independent dataset-level facts.
+    dataset_claim_patterns = [
+        r"(?:dataset contains|contains|has|with)\s+([\d,]+)\s+rows",
+        r"(?:and\s+)?([\d,]+)\s+columns",
+        r"([\d,]+)\s+missing cells",
+        r"([\d,]+)\s+(?:exact\s+)?duplicate rows",
+        r"(?:most common|most frequent|largest)\s+.+?\s+(?:category|group|value)?\s*(?:is|was|:)",
+    ]
+
+    has_dataset_claim = any(
+        re.search(pattern, text, re.IGNORECASE)
+        for pattern in dataset_claim_patterns
+    )
+
+    if not has_dataset_claim:
+        return {
+            "pass": True,
+            "overall": "NOT_APPLICABLE",
+            "status": "NOT_APPLICABLE",
+            "skipped": True,
+            "checks": {},
+            "verified_claims": 0,
+            "failed_claims": 0,
+            "reason": (
+                "No dataset-level descriptive claims were found. "
+                "Statistical claims are handled by dedicated result "
+                "and evidence validators."
+            ),
+        }
+
     facts = None
+
     if isinstance(result, dict):
         supporting = result.get("supporting_result")
+
         if isinstance(supporting, dict):
             facts = supporting.get("dataset_facts")
+
         if facts is None:
             facts = result.get("dataset_facts")
 
@@ -1503,11 +1782,14 @@ def validate_descriptive_summary_claims(insight, result):
             "pass": False,
             "overall": "FAIL",
             "checks": {},
-            "reason": "Independent dataset facts are missing; descriptive claims cannot be verified."
+            "reason": (
+                "Independent dataset facts are missing; "
+                "dataset-level descriptive claims cannot be verified."
+            ),
         }
 
-    text = str(insight or "")
     checks = {}
+
     patterns = [
         (
             "row_count",
@@ -1533,15 +1815,18 @@ def validate_descriptive_summary_claims(insight, result):
 
     for check_name, pattern, fact_key in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
+
         if match:
             try:
                 claimed = int(match.group(1).replace(",", ""))
                 actual = int(facts.get(fact_key))
+
                 checks[check_name] = {
                     "pass": claimed == actual,
                     "claimed": claimed,
                     "actual": actual,
                 }
+
             except (TypeError, ValueError):
                 checks[check_name] = {
                     "pass": False,
@@ -1550,32 +1835,49 @@ def validate_descriptive_summary_claims(insight, result):
                     "reason": "Independent fact is missing or not numeric.",
                 }
 
-    # Validate top categorical values when the insight uses the exact
-    # "most common ... is VALUE" / "largest ... group is VALUE" wording.
     categorical = facts.get("categorical_summary", {})
+
     if isinstance(categorical, dict):
         for column, entries in categorical.items():
             if not isinstance(entries, list) or not entries:
                 continue
-            top_value = str(entries[0].get("value", "")) if isinstance(entries[0], dict) else ""
+
+            top_value = (
+                str(entries[0].get("value", ""))
+                if isinstance(entries[0], dict)
+                else ""
+            )
+
             if not top_value:
                 continue
+
             value_pattern = re.compile(
                 r"(?:most common|most frequent|largest)\s+"
                 + re.escape(str(column))
                 + r"\s+(?:category|group|value)?\s*(?:is|was|:)\s*"
-                + re.escape(top_value),
+                + r"(.+?)(?:[.;\n]|$)",
                 re.IGNORECASE,
             )
-            if value_pattern.search(text):
+
+            match = value_pattern.search(text)
+
+            if match:
+                claimed_value = match.group(1).strip().strip("'\"")
+
                 checks[f"top_category_{column}"] = {
-                    "pass": True,
-                    "claimed": top_value,
+                    "pass": claimed_value.casefold() == top_value.casefold(),
+                    "claimed": claimed_value,
                     "actual": top_value,
                 }
 
-    failed = [name for name, item in checks.items() if not item.get("pass", False)]
+    failed = [
+        name
+        for name, item in checks.items()
+        if not item.get("pass", False)
+    ]
+
     passed = bool(checks) and not failed
+
     return {
         "pass": passed,
         "overall": "PASS" if passed else "FAIL",
@@ -1583,11 +1885,10 @@ def validate_descriptive_summary_claims(insight, result):
         "verified_claims": len(checks) - len(failed),
         "failed_claims": len(failed),
         "reason": None if passed else (
-            "No verifiable descriptive claims were found, or one or more claims "
-            "did not match independently computed dataset facts."
+            "No verifiable dataset-level claims were found, or one or "
+            "more claims did not match independently computed facts."
         ),
     }
-
 
 
 def validate_conversion_factor_insight(insight, result):
@@ -1682,6 +1983,115 @@ def validate_conversion_factor_insight(insight, result):
         "mentioned_percentage_values": sorted(mentioned_rates),
     }
 
+def validate_extrema_insight(insight, result, user_question=None):
+    """Validate a scalar maximum/minimum claim against the generated result."""
+    if not isinstance(result, dict):
+        return {"pass": False, "reason": "Extrema result is not a dictionary.", "checks": []}
+
+    def find_payload(obj, depth=0):
+        if depth > 6 or not isinstance(obj, dict):
+            return None
+        if (obj.get("analysis_type") == "extrema_analysis"
+                and obj.get("value") is not None
+                and obj.get("operation") in {"maximum", "minimum"}):
+            return obj
+        for key in ("primary_result", "result", "supporting_result", "evidence", "validated_result"):
+            found = find_payload(obj.get(key), depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    payload = find_payload(result)
+    if payload is None:
+        return {"pass": False, "reason": "No validated maximum/minimum payload was found.", "checks": []}
+    operation = payload.get("operation")
+    metric = str(payload.get("metric_column") or "").strip()
+    expected = _safe_float(payload.get("value"))
+    text = " ".join(str(insight or "").lower().replace("_", " ").split())
+    metric_text = " ".join(metric.lower().replace("_", " ").split())
+    metric_ok = bool(metric_text and re.search(
+        r"(?<![\w])" + re.escape(metric_text) + r"(?![\w])", text
+    ))
+    operation_pattern = (r"\b(maximum|max|highest|largest|greatest)\b"
+                         if operation == "maximum"
+                         else r"\b(minimum|min|lowest|smallest|least)\b")
+    operation_ok = bool(re.search(operation_pattern, text))
+    claimed_numbers = []
+    for token in re.findall(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?", str(insight or "")):
+        parsed = _safe_float(token.replace(",", ""))
+        if parsed is not None:
+            claimed_numbers.append(parsed)
+    value_ok = expected is not None and any(
+        round(number, 2) == round(expected, 2) for number in claimed_numbers
+    )
+    checks = [
+        {"check": "metric_column_mentioned", "pass": metric_ok},
+        {"check": "extreme_operation_mentioned", "pass": operation_ok},
+        {"check": "extreme_value_matches_result", "pass": value_ok},
+    ]
+    failed = [check for check in checks if not check["pass"]]
+    return {
+        "pass": not failed,
+        "reason": None if not failed else "The insight does not state the requested maximum/minimum metric and validated value.",
+        "operation": operation, "metric_column": metric,
+        "validated_value": expected, "checks": checks,
+    }
+
+
+
+# ==========================================================
+# NESTED IQR RESULT DISCOVERY
+# ==========================================================
+
+def _find_iqr_result(result, depth=0, metric_hint=None):
+    """Find a validated IQR result inside direct or specification-driven output."""
+    if depth > 10:
+        return None
+    if isinstance(result, list):
+        for item in result:
+            found = _find_iqr_result(item, depth + 1, metric_hint)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(result, dict):
+        return None
+
+    method = re.sub(r"[\s_-]+", "", str(result.get("method", "")).strip().lower())
+    if method in {"iqr", "interquartilerange"}:
+        if str(result.get("status", "PASS")).upper() == "PASS":
+            normalized = dict(result)
+            if metric_hint and not any(normalized.get(key) for key in ("metric_column", "column", "metric")):
+                normalized["column"] = str(metric_hint)
+            return normalized
+
+    operation_results = result.get("operation_results")
+    if isinstance(operation_results, dict):
+        for operation_name, operation_result in operation_results.items():
+            if str(operation_name).lower() in {"outlier_detection", "outlier_analysis", "anomaly_detection"} and isinstance(operation_result, dict):
+                for metric_name, metric_result in operation_result.items():
+                    found = _find_iqr_result(metric_result, depth + 1, metric_name)
+                    if found is not None:
+                        return found
+            found = _find_iqr_result(operation_result, depth + 1, metric_hint)
+            if found is not None:
+                return found
+
+    for key in ("primary_result", "result", "validated_result", "selected_result", "supporting_result", "summary", "outlier_detection", "results"):
+        if key in result:
+            found = _find_iqr_result(result.get(key), depth + 1, metric_hint)
+            if found is not None:
+                return found
+
+    for key, value in result.items():
+        if key in {"operation_results", "primary_result", "result", "validated_result", "selected_result", "supporting_result", "summary", "outlier_detection", "results", "dataset_facts", "numeric_summary", "categorical_summary"}:
+            continue
+        if isinstance(value, (dict, list)):
+            found = _find_iqr_result(value, depth + 1, str(key))
+            if found is not None:
+                return found
+    return None
+
+
 # ==========================================================
 # MAIN VALIDATOR
 # ==========================================================
@@ -1757,6 +2167,35 @@ def validate_insight(
         insight=insight,
         result=result
     )
+
+    # Scalar maximum/minimum must be validated against the calculated value.
+    extrema_requested = (
+        "extrema_analysis" in analysis
+        or "extrema_analysis" in task_type
+        or (isinstance(result, dict) and result.get("analysis_type") == "extrema_analysis")
+        or (
+            re.search(r"\b(maximum|max|minimum|min)\b", question)
+            and not any(term in question for term in ("by category", "for each", "rank", "ranking"))
+        )
+    )
+    if extrema_requested:
+        task_validation = validate_extrema_insight(
+            insight=insight, result=result, user_question=user_question
+        )
+        overall_pass = (
+            presence["pass"] and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence, "result": result_check,
+                "extrema_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
 
     # Descriptive summaries need independent dataset facts. Do this before
     # auto-detecting nested conversion metrics, otherwise an unrelated nested
@@ -1844,29 +2283,106 @@ def validate_insight(
         }
 
     # ------------------------------------------------------
-    # ANOMALY
+    # IQR OUTLIER VALIDATION
+    # Specification-driven results keep method/bounds/count nested under
+    # operation_results[outlier_detection][metric]. Normalize that result
+    # before invoking the existing IQR claim validator.
+    # ------------------------------------------------------
+    iqr_result = _find_iqr_result(result)
+    if iqr_result is not None:
+        normalized_iqr = dict(iqr_result)
+        normalized_iqr.setdefault("outlier_count", normalized_iqr.get("anomaly_count"))
+        normalized_iqr.setdefault("column", normalized_iqr.get("metric_column", normalized_iqr.get("metric")))
+        normalized_iqr.setdefault("valid_value_count", normalized_iqr.get("valid_count"))
+        task_validation = validate_anomaly_claims(insight, normalized_iqr)
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "iqr_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
+
+    # ------------------------------------------------------
+    # ISOLATION FOREST
+    # Keep this route separate from the legacy IQR validator.
+    # Return immediately so later generic routing cannot overwrite it.
+    # ------------------------------------------------------
+
+    result_method = (
+        str(result.get("method", "")).strip().lower()
+        if isinstance(result, dict)
+        else ""
+    )
+    normalized_result_method = re.sub(
+        r"[\s_-]+",
+        "",
+        result_method,
+    )
+    is_isolation_forest = normalized_result_method == "isolationforest"
+
+    if is_isolation_forest:
+        task_validation = validate_isolation_forest_claims(
+            insight,
+            result,
+        )
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
+        )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "isolation_forest_claim_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
+
+    # ------------------------------------------------------
+    # LEGACY IQR ANOMALY / OUTLIER VALIDATION
     # ------------------------------------------------------
 
     if (
         "anomaly" in analysis
-        or
-        "outlier" in analysis
-        or
-        "anomaly" in task_type
-        or
-        "outlier" in task_type
-        or
-        "unusual" in question
+        or "outlier" in analysis
+        or "anomaly" in task_type
+        or "outlier" in task_type
+        or "unusual" in question
     ):
-
         task_validation = validate_anomaly_claims(
             insight,
             result
         )
-
-        check_name = (
-            "claim_level_validation"
+        overall_pass = (
+            presence["pass"]
+            and result_check["pass"]
+            and task_validation.get("pass", False)
+            and relevance_validation.get("pass", False)
         )
+        return {
+            "overall": "PASS" if overall_pass else "FAIL",
+            "pass": overall_pass,
+            "checks": {
+                "presence": presence,
+                "result": result_check,
+                "claim_level_validation": task_validation,
+                "question_relevance": relevance_validation,
+            },
+        }
 
     # ------------------------------------------------------
     # GROUPED MEAN NUMERICAL DIRECTION CLAIMS
@@ -1916,7 +2432,7 @@ def validate_insight(
 
     if (
         isinstance(result, dict)
-        and result.get("analysis_type") == "grouped_conversion_rate_by_balance"
+        and str(result.get("analysis_type", "")).startswith("grouped_conversion_rate_by_")
     ):
         task_validation = validate_grouped_insight(
             insight,

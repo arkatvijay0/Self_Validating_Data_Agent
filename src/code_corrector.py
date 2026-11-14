@@ -884,7 +884,8 @@ def correct_generated_code(
     target_columns=None,
     filepath=None,
     data_profile=None,
-    attempt_number=2
+    attempt_number=2,
+    analytical_spec=None
 ):
     """
     Main validation-feedback-based correction function.
@@ -986,7 +987,10 @@ def correct_generated_code(
                 generate_code_mock(
                     step_text,
                     filepath,
-                    data_profile
+                    data_profile=data_profile,
+                    feedback=feedback,
+                    target_columns=target_columns,
+                    analytical_spec=analytical_spec
                 )
             )
 

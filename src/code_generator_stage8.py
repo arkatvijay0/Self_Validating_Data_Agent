@@ -1,0 +1,2123 @@
+# ============================================================
+# CODE GENERATOR
+# SELF-VALIDATING EDA AGENT
+# Rule-based local implementation
+# ============================================================
+
+import os
+import re
+import pandas as pd
+
+
+# ============================================================
+# COLUMN NORMALIZATION
+# ============================================================
+
+def normalize_column_name(column_name):
+    """Normalize common aliases to actual dataset column names."""
+
+    if column_name is None:
+        return None
+
+    normalized = str(column_name).strip()
+
+    aliases = {
+        "unitssold": "Units Sold",
+        "totalprofit": "Total Profit",
+        "totalrevenue": "Total Revenue",
+        "totalcost": "Total Cost",
+        "orderid": "Order ID",
+    }
+
+    return aliases.get(
+        normalized.lower(),
+        normalized
+    )
+
+
+# ============================================================
+# COMMON CODE HEADER
+# ============================================================
+
+def build_code_header(filepath):
+    """
+    Build executable code that loads the requested dataset.
+
+    The filepath is inserted into the generated code as an
+    absolute path so execution does not depend on the
+    terminal's current working directory.
+    """
+
+    filepath = os.path.abspath(filepath)
+
+    return f'''import pandas as pd
+import numpy as np
+
+df = pd.read_csv(r"{filepath}")
+
+'''
+
+
+# ============================================================
+# RULE-BASED CODE GENERATOR
+# ============================================================
+
+def _generate_code_legacy(
+    step_text,
+    filepath,
+    data_profile=None,
+    feedback=None,
+    target_columns=None,
+    analytical_spec=None
+):
+    """
+    Generate executable Python code for an EDA plan step.
+
+    Parameters
+    ----------
+    step_text : str
+        The EDA step that needs code.
+
+    filepath : str
+        Path to the CSV dataset.
+
+    data_profile : dict, optional
+        Dataset profile supplied by the pipeline.
+        This is used only by the generator itself when needed.
+        Generated execution code does not depend on this
+        variable being present in its execution namespace.
+
+    feedback : str, optional
+        Feedback from a previous failed execution.
+
+    analytical_spec : dict, optional
+        Structured requirements extracted from the original user question.
+        The parameter is accepted for end-to-end propagation; the next
+        generator phase will use it to drive generic code generation.
+
+    Returns
+    -------
+    str
+        Complete executable Python code.
+    """
+
+    step_lower = str(step_text).strip().lower()
+
+    code = build_code_header(filepath)
+
+
+    if step_lower.startswith("stop:"):
+        code += '''
+result = {
+    "status": "UNSUPPORTED",
+    "reason": "The requested metric is not available.",
+    "available_columns": df.columns.tolist(),
+}
+'''
+        return code
+
+
+    # Filtered average call duration for a named month.
+    month_codes = {
+        "january": "jan", "february": "feb", "march": "mar", "april": "apr",
+        "may": "may", "june": "jun", "july": "jul", "august": "aug",
+        "september": "sep", "october": "oct", "november": "nov", "december": "dec",
+    }
+    month_tokens = {**month_codes, **{code: code for code in month_codes.values()}}
+    requested_month = next((name for name in month_tokens if name in step_lower), None)
+    if "duration" in step_lower and any(word in step_lower for word in ("average", "mean", "avg")) and requested_month:
+        month_code = month_codes.get(requested_month, requested_month)
+        code += f"""
+required_columns = ["month", "duration"]
+missing_columns = [column for column in required_columns if column not in df.columns]
+if missing_columns:
+    result = {{"status": "FAIL", "reason": "Required columns missing: " + ", ".join(missing_columns)}}
+else:
+    month_values = df["month"].astype("string").str.strip().str.lower()
+    filtered = df.loc[month_values.isin([{month_code!r}, {requested_month!r}])].copy()
+    duration_values = pd.to_numeric(filtered["duration"], errors="coerce")
+    valid_duration = duration_values.dropna()
+    result = {{
+        "status": "PASS" if not filtered.empty and not valid_duration.empty else "FAIL",
+        "analysis_type": "filtered_mean",
+        "filter_column": "month",
+        "filter_value": {month_code!r},
+        "metric_column": "duration",
+        "filtered_rows": int(len(filtered)),
+        "valid_duration_count": int(valid_duration.count()),
+        "mean_duration": float(valid_duration.mean()) if not valid_duration.empty else None,
+        "median_duration": float(valid_duration.median()) if not valid_duration.empty else None,
+        "reason": None if not filtered.empty and not valid_duration.empty else "No valid rows found for the requested month."
+    }}
+"""
+        return code
+
+    # ========================================================
+    # CUSTOMER CONVERSION FACTOR ANALYSIS
+    # ========================================================
+    # This rule must run before the overall conversion-validation
+    # rule so questions about conversion factors are not reduced
+    # to a row-by-row target consistency check.
+
+    conversion_factor_request = (
+        "conversion" in step_lower
+        and any(
+            phrase in step_lower
+            for phrase in (
+                "factor",
+                "associated with",
+                "affecting",
+                "influencing",
+                "important patterns",
+                "patterns in",
+                "customer conversion",
+                "conversion by",
+                "drivers of",
+                "predictors of",
+            )
+        )
+    )
+
+    if conversion_factor_request:
+        code += '''
+# Customer conversion-factor analysis.
+# Use y (yes/no) as the authoritative target when it is available.
+if "y" in df.columns:
+    target_text = df["y"].astype("string").str.strip().str.lower()
+    target = target_text.map({"yes": 1, "no": 0})
+    target_column = "y"
+elif "conversion" in df.columns:
+    target = pd.to_numeric(df["conversion"], errors="coerce")
+    target_column = "conversion"
+else:
+    target = None
+    target_column = None
+
+if target is None:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "conversion_factor_analysis",
+        "reason": "No supported conversion target column ('y' or 'conversion') was found.",
+        "available_columns": df.columns.tolist(),
+    }
+else:
+    valid_target_mask = target.isin([0, 1])
+    analysis_df = df.loc[valid_target_mask].copy()
+    analysis_df["_converted_target"] = target.loc[valid_target_mask].astype(int)
+
+    total_records = int(len(analysis_df))
+    converted_count = int(analysis_df["_converted_target"].sum())
+    overall_rate = (
+        float(analysis_df["_converted_target"].mean() * 100)
+        if total_records else None
+    )
+
+    # Categorical predictors are compared directly. The target,
+    # derived target, and obvious identifiers are excluded.
+    categorical_columns = analysis_df.select_dtypes(
+        include=["object", "category", "bool", "string"]
+    ).columns.tolist()
+
+    excluded_names = {
+        "y", "conversion", "_converted_target",
+        "id", "customer_id", "customer id",
+        "record_id", "record id",
+    }
+
+    factor_results = {}
+    minimum_group_size = 10
+
+    for column in categorical_columns:
+        if column.strip().lower() in excluded_names:
+            continue
+
+        working = analysis_df[[column, "_converted_target"]].copy()
+        working["_factor_group"] = (
+            working[column].astype("string").fillna("Missing").str.strip()
+        )
+        working.loc[working["_factor_group"] == "", "_factor_group"] = "Missing"
+
+        grouped = working.groupby(
+            "_factor_group", dropna=False
+        )["_converted_target"].agg(
+            records="count",
+            converted_count="sum",
+            conversion_rate="mean",
+        )
+
+        grouped["conversion_rate_percent"] = (
+            grouped["conversion_rate"] * 100
+        ).round(2)
+        grouped = grouped.drop(columns=["conversion_rate"]).reset_index()
+        grouped = grouped.rename(columns={"_factor_group": "group"})
+        grouped["records"] = grouped["records"].astype(int)
+        grouped["converted_count"] = grouped["converted_count"].astype(int)
+        grouped["non_converted_count"] = (
+            grouped["records"] - grouped["converted_count"]
+        ).astype(int)
+        grouped["eligible_for_comparison"] = (
+            grouped["records"] >= minimum_group_size
+        )
+        grouped = grouped.sort_values(
+            ["conversion_rate_percent", "records"],
+            ascending=[False, False]
+        )
+
+        factor_results[column] = grouped.to_dict(orient="records")
+
+    # Numeric predictors are binned into quantile groups where possible.
+    # This produces readable group comparisons rather than treating
+    # every numeric value as a separate category.
+    numeric_candidates = [
+        column for column in analysis_df.select_dtypes(include="number").columns
+        if column not in {"_converted_target"}
+        and column.strip().lower() not in excluded_names
+    ]
+
+    numeric_factor_results = {}
+    for column in numeric_candidates:
+        values = pd.to_numeric(analysis_df[column], errors="coerce")
+        non_missing = values.dropna()
+
+        if non_missing.nunique() < 2 or len(non_missing) < minimum_group_size:
+            continue
+
+        try:
+            bins = pd.qcut(
+                values,
+                q=4,
+                duplicates="drop"
+            )
+            if bins.nunique(dropna=True) < 2:
+                continue
+
+            working = pd.DataFrame({
+                "_factor_group": bins.astype("string").fillna("Missing"),
+                "_converted_target": analysis_df["_converted_target"],
+            })
+            grouped = working.groupby(
+                "_factor_group", dropna=False
+            )["_converted_target"].agg(
+                records="count",
+                converted_count="sum",
+                conversion_rate="mean",
+            )
+            grouped["conversion_rate_percent"] = (
+                grouped["conversion_rate"] * 100
+            ).round(2)
+            grouped = grouped.drop(columns=["conversion_rate"]).reset_index()
+            grouped = grouped.rename(columns={"_factor_group": "group"})
+            grouped["records"] = grouped["records"].astype(int)
+            grouped["converted_count"] = grouped["converted_count"].astype(int)
+            grouped["non_converted_count"] = (
+                grouped["records"] - grouped["converted_count"]
+            ).astype(int)
+            grouped["eligible_for_comparison"] = (
+                grouped["records"] >= minimum_group_size
+            )
+            numeric_factor_results[column] = grouped.to_dict(orient="records")
+        except (ValueError, TypeError):
+            # A numeric column that cannot be sensibly binned is omitted.
+            continue
+
+    usable_factor_count = len(factor_results) + len(numeric_factor_results)
+
+    result = {
+        "status": (
+            "PASS" if total_records > 0 and usable_factor_count > 0 else "FAIL"
+        ),
+        "analysis_type": "conversion_factor_analysis",
+        "target_column": target_column,
+        "target_mapping": (
+            {"yes": 1, "no": 0}
+            if target_column == "y"
+            else {"numeric_values": "0 = no conversion; 1 = conversion"}
+        ),
+        "total_dataset_records": int(len(df)),
+        "valid_target_records": total_records,
+        "excluded_invalid_target_records": int(len(df) - total_records),
+        "converted_count": converted_count,
+        "non_converted_count": int(total_records - converted_count),
+        "overall_conversion_rate_percent": (
+            round(overall_rate, 2) if overall_rate is not None else None
+        ),
+        "overall_conversion_rate_formula": (
+            f"{converted_count} / {total_records} * 100"
+        ),
+        "categorical_factor_results": factor_results,
+        "numeric_factor_results": numeric_factor_results,
+        "minimum_group_size_for_comparison": minimum_group_size,
+        "interpretation_notes": [
+            "Group conversion rate = converted records in group / valid records in group * 100.",
+            "Groups below the minimum group size are shown but marked ineligible for comparison.",
+            "These are observational associations and do not establish causation.",
+            "Call duration is measured after contact and may not be available for pre-contact targeting.",
+        ],
+    }
+'''
+        return code
+
+    # Question-specific bank conversion validation.
+    conversion_step = (
+        "conversion" in step_lower
+        and any(token in step_lower for token in [
+            "rate", "percentage", "converted", "conversion = 1",
+            "conversion=1", "row-by-row", "map y"
+        ])
+    )
+    if conversion_step:
+        code += """
+required_columns = ["conversion", "y"]
+missing_columns = [column for column in required_columns if column not in df.columns]
+if missing_columns:
+    result = {
+        "status": "FAIL",
+        "reason": "Required columns are missing: " + ", ".join(missing_columns),
+        "available_columns": df.columns.tolist(),
+    }
+else:
+    conversion_numeric = pd.to_numeric(df["conversion"], errors="coerce")
+    y_normalized = df["y"].astype("string").str.strip().str.lower()
+    y_mapped = y_normalized.map({"yes": 1, "no": 0})
+    total_records = int(len(df))
+    converted_count = int((conversion_numeric == 1).sum())
+    non_converted_count = int((conversion_numeric == 0).sum())
+    conversion_valid = int(conversion_numeric.isin([0, 1]).sum())
+    y_valid = int(y_mapped.isin([0, 1]).sum())
+    compared = conversion_numeric.notna() & y_mapped.notna()
+    matches = int((conversion_numeric[compared] == y_mapped[compared]).sum())
+    mismatches = int(compared.sum() - matches)
+    conversion_rate = (converted_count / total_records * 100) if total_records else 0.0
+    non_conversion_rate = (non_converted_count / total_records * 100) if total_records else 0.0
+    result = {
+        "status": "PASS" if (
+            conversion_valid == total_records and y_valid == total_records and mismatches == 0
+        ) else "FAIL",
+        "total_records": total_records,
+        "converted_count_conversion_1": converted_count,
+        "non_converted_count_conversion_0": non_converted_count,
+        "conversion_rate_percent": round(conversion_rate, 4),
+        "non_conversion_rate_percent": round(non_conversion_rate, 4),
+        "valid_conversion_values": conversion_valid,
+        "valid_y_values_after_mapping": y_valid,
+        "compared_records": int(compared.sum()),
+        "row_by_row_matches": matches,
+        "row_by_row_mismatches": mismatches,
+        "unmatched_conversion_values": int(total_records - conversion_valid),
+        "unmapped_y_values": int(total_records - y_valid),
+        "conversion_rate_formula": f"{converted_count} / {total_records} * 100",
+        "non_conversion_rate_formula": f"{non_converted_count} / {total_records} * 100",
+    }
+"""
+        return code
+
+
+    # ========================================================
+    # 1. DETECT ANALYSIS CONTEXT
+    # ========================================================
+
+    explicit_relationship_target = (
+        "units sold" in step_lower
+        and "total profit" in step_lower
+    )
+
+    relationship_context = (
+        explicit_relationship_target
+        or (
+            "relationship" in step_lower
+            and any(
+                word in step_lower
+                for word in [
+                    "outlier",
+                    "strength",
+                    "direction",
+                    "interpret",
+                    "influence",
+                ]
+            )
+        )
+    )
+
+    trend_context = (
+        "revenue" in step_lower
+        and any(
+            word in step_lower
+            for word in [
+                "over time",
+                "trend",
+                "month",
+                "change",
+                "increase",
+                "decrease",
+            ]
+        )
+    )
+
+    # ========================================================
+    # 2. CATEGORICAL FREQUENCY ANALYSIS
+    # ========================================================
+    #
+    # IMPORTANT FIX:
+    # The generated code detects categorical columns directly
+    # from df. It does not reference data_profile because
+    # data_profile is not automatically available inside the
+    # generated code execution namespace.
+    # ========================================================
+
+    categorical_frequency_request = (
+        "categor" in step_lower
+        and any(
+            word in step_lower
+            for word in [
+                "frequent",
+                "frequency",
+                "most common",
+                "value counts",
+                "distribution",
+                "frequency table",
+            ]
+        )
+    )
+
+    if categorical_frequency_request:
+
+        code += '''
+# Detect categorical columns from the loaded dataset.
+categorical_columns = df.select_dtypes(
+    include=["object", "category", "bool"]
+).columns.tolist()
+
+# Exclude identifiers because their unique values generally
+# do not provide useful categorical frequency insights.
+identifier_tokens = [
+    "order id",
+    "customer id",
+    "transaction id",
+    "record id",
+    "invoice id",
+]
+
+categorical_columns = [
+    column
+    for column in categorical_columns
+    if not any(
+        token in column.lower()
+        for token in identifier_tokens
+    )
+]
+
+frequency_results = {}
+
+for column in categorical_columns:
+
+    counts = df[column].value_counts(
+        dropna=False
+    ).head(10)
+
+    frequency_results[column] = pd.DataFrame({
+        "value": counts.index.astype(str),
+        "count": counts.values,
+        "percentage": (
+            counts.values / max(len(df), 1) * 100
+        ).round(2),
+    }).reset_index(drop=True)
+
+if frequency_results:
+
+    result = frequency_results
+
+else:
+
+    result = {
+        "message": "No categorical columns were found.",
+        "available_columns": df.columns.tolist(),
+    }
+'''
+
+        return code
+
+    # ========================================================
+    # 3. EXPLICIT IQR OUTLIER STEP
+    # ========================================================
+
+    if (
+        "identify potential outliers" in step_lower
+        and "iqr" in step_lower
+        and "total profit" in step_lower
+    ):
+
+        code += '''
+profit = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+)
+
+Q1 = profit.quantile(0.25)
+Q3 = profit.quantile(0.75)
+IQR = Q3 - Q1
+
+lower_bound = Q1 - 1.5 * IQR
+upper_bound = Q3 + 1.5 * IQR
+
+outlier_mask = (
+    (profit < lower_bound)
+    | (profit > upper_bound)
+)
+
+outliers = df.loc[outlier_mask].copy()
+
+result = outliers[
+    [
+        "Region",
+        "Country",
+        "Order ID",
+        "Total Profit",
+    ]
+]
+'''
+
+        return code
+
+    # ========================================================
+    # 4. DESCRIPTIVE STATISTICS FOR TOTAL PROFIT
+    # ========================================================
+
+    if (
+        "calculate descriptive statistics for" in step_lower
+        and "total profit" in step_lower
+    ):
+
+        code += '''
+profit = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+).dropna()
+
+result = profit.describe()
+'''
+
+        return code
+
+    # ========================================================
+    # 5. QUARTILES AND IQR
+    # ========================================================
+
+    if (
+        "total profit" in step_lower
+        and (
+            "calculate the first quartile" in step_lower
+            or "calculate the interquartile range" in step_lower
+            or "calculate q1" in step_lower
+            or "calculate q3" in step_lower
+        )
+    ):
+
+        code += '''
+profit = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+).dropna()
+
+Q1 = profit.quantile(0.25)
+Q3 = profit.quantile(0.75)
+IQR = Q3 - Q1
+
+lower_bound = Q1 - 1.5 * IQR
+upper_bound = Q3 + 1.5 * IQR
+
+result = {
+    "Q1": float(Q1),
+    "Q3": float(Q3),
+    "IQR": float(IQR),
+    "lower_bound": float(lower_bound),
+    "upper_bound": float(upper_bound),
+}
+'''
+
+        return code
+
+    # ========================================================
+    # 6. RELATIONSHIP ANALYSIS
+    # Units Sold vs Total Profit
+    # ========================================================
+
+    if explicit_relationship_target:
+
+        # ----------------------------------------------------
+        # Pearson correlation
+        # ----------------------------------------------------
+
+        if "pearson" in step_lower:
+
+            code += '''
+x = pd.to_numeric(
+    df["Units Sold"],
+    errors="coerce"
+)
+
+y = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+)
+
+valid = pd.DataFrame({
+    "Units Sold": x,
+    "Total Profit": y,
+}).dropna()
+
+correlation = valid["Units Sold"].corr(
+    valid["Total Profit"],
+    method="pearson"
+)
+
+result = {
+    "method": "Pearson",
+    "correlation": float(correlation),
+    "observations": int(len(valid)),
+}
+'''
+
+            return code
+
+        # ----------------------------------------------------
+        # Spearman correlation
+        # ----------------------------------------------------
+
+        if "spearman" in step_lower:
+
+            code += '''
+x = pd.to_numeric(
+    df["Units Sold"],
+    errors="coerce"
+)
+
+y = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+)
+
+valid = pd.DataFrame({
+    "Units Sold": x,
+    "Total Profit": y,
+}).dropna()
+
+correlation = valid["Units Sold"].corr(
+    valid["Total Profit"],
+    method="spearman"
+)
+
+result = {
+    "method": "Spearman",
+    "correlation": float(correlation),
+    "observations": int(len(valid)),
+}
+'''
+
+            return code
+
+        # ----------------------------------------------------
+        # Relationship interpretation
+        # ----------------------------------------------------
+
+        if any(
+            word in step_lower
+            for word in [
+                "interpret",
+                "strength",
+                "direction",
+            ]
+        ):
+
+            code += '''
+x = pd.to_numeric(
+    df["Units Sold"],
+    errors="coerce"
+)
+
+y = pd.to_numeric(
+    df["Total Profit"],
+    errors="coerce"
+)
+
+valid = pd.DataFrame({
+    "Units Sold": x,
+    "Total Profit": y,
+}).dropna()
+
+pearson = valid["Units Sold"].corr(
+    valid["Total Profit"],
+    method="pearson"
+)
+
+spearman = valid["Units Sold"].corr(
+    valid["Total Profit"],
+    method="spearman"
+)
+
+if pd.isna(pearson):
+
+    strength = "undefined"
+    direction = "undefined"
+
+else:
+
+    absolute_correlation = abs(pearson)
+
+    if absolute_correlation < 0.30:
+        strength = "weak"
+    elif absolute_correlation < 0.70:
+        strength = "moderate"
+    else:
+        strength = "strong"
+
+    if pearson > 0:
+        direction = "positive"
+    elif pearson < 0:
+        direction = "negative"
+    else:
+        direction = "no linear relationship"
+
+result = {
+    "pearson": float(pearson),
+    "spearman": float(spearman),
+    "strength": strength,
+    "direction": direction,
+    "observations": int(len(valid)),
+}
+'''
+
+            return code
+
+        # ----------------------------------------------------
+        # Relationship outliers
+        # ----------------------------------------------------
+
+        if (
+            "outlier" in step_lower
+            or "unusual" in step_lower
+        ):
+
+            code += '''
+result = {}
+
+for column in ["Units Sold", "Total Profit"]:
+
+    values = pd.to_numeric(
+        df[column],
+        errors="coerce"
+    ).dropna()
+
+    Q1 = values.quantile(0.25)
+    Q3 = values.quantile(0.75)
+    IQR = Q3 - Q1
+
+    lower_bound = Q1 - 1.5 * IQR
+    upper_bound = Q3 + 1.5 * IQR
+
+    outliers = values[
+        (values < lower_bound)
+        | (values > upper_bound)
+    ]
+
+    result[column] = {
+        "Q1": float(Q1),
+        "Q3": float(Q3),
+        "IQR": float(IQR),
+        "lower_bound": float(lower_bound),
+        "upper_bound": float(upper_bound),
+        "outlier_count": int(len(outliers)),
+        "outlier_values": [
+            float(value)
+            for value in outliers.tolist()
+        ],
+    }
+'''
+
+            return code
+
+        # ----------------------------------------------------
+        # Relationship distribution
+        # ----------------------------------------------------
+
+        if any(
+            word in step_lower
+            for word in [
+                "distribution",
+                "distributions",
+                "inspect",
+            ]
+        ):
+
+            code += '''
+result = df[
+    ["Units Sold", "Total Profit"]
+].describe()
+'''
+
+            return code
+
+        # ----------------------------------------------------
+        # General relationship calculation
+        # ----------------------------------------------------
+
+        code += '''
+valid = df[
+    ["Units Sold", "Total Profit"]
+].apply(
+    pd.to_numeric,
+    errors="coerce"
+).dropna()
+
+result = {
+    "pearson": float(
+        valid["Units Sold"].corr(
+            valid["Total Profit"],
+            method="pearson"
+        )
+    ),
+    "spearman": float(
+        valid["Units Sold"].corr(
+            valid["Total Profit"],
+            method="spearman"
+        )
+    ),
+    "observations": int(len(valid)),
+}
+'''
+
+        return code
+
+    # ========================================================
+    # 7. REVENUE TREND ANALYSIS
+    # ========================================================
+
+    if trend_context:
+
+        code += '''
+df["Order Date"] = pd.to_datetime(
+    df["Order Date"],
+    errors="coerce"
+)
+
+valid = df.dropna(
+    subset=["Order Date"]
+).copy()
+
+monthly_revenue = (
+    valid.groupby(
+        valid["Order Date"].dt.to_period("M")
+    )["Total Revenue"]
+    .sum()
+    .sort_index()
+)
+'''
+
+        if (
+            "largest increase" in step_lower
+            or "largest decrease" in step_lower
+            or "increase and decrease" in step_lower
+        ):
+
+            code += '''
+monthly_change = monthly_revenue.diff().dropna()
+
+if not monthly_change.empty:
+
+    increase_period = monthly_change.idxmax()
+    decrease_period = monthly_change.idxmin()
+
+    result = {
+        "monthly_revenue": {
+            str(period): float(value)
+            for period, value
+            in monthly_revenue.items()
+        },
+        "largest_increase_period": str(increase_period),
+        "largest_increase": float(
+            monthly_change.loc[increase_period]
+        ),
+        "largest_decrease_period": str(decrease_period),
+        "largest_decrease": float(
+            monthly_change.loc[decrease_period]
+        ),
+    }
+
+else:
+
+    result = {
+        "monthly_revenue": {
+            str(period): float(value)
+            for period, value
+            in monthly_revenue.items()
+        },
+        "message": "Not enough monthly observations to calculate changes.",
+    }
+'''
+
+        elif (
+            "monthly change" in step_lower
+            or "month-to-month" in step_lower
+        ):
+
+            code += '''
+result = monthly_revenue.diff()
+'''
+
+        else:
+
+            code += '''
+result = monthly_revenue
+'''
+
+        return code
+
+    # ========================================================
+    # 8. REGION PROFIT COMPARISON
+    # ========================================================
+
+    if (
+        "region" in step_lower
+        and "total profit" in step_lower
+        and (
+            "group" in step_lower
+            or "rank" in step_lower
+            or "highest" in step_lower
+            or "compare" in step_lower
+        )
+    ):
+
+        code += '''
+region_profit = (
+    df.groupby("Region")["Total Profit"]
+    .sum()
+    .sort_values(ascending=False)
+)
+
+if not region_profit.empty:
+
+    highest_region = region_profit.index[0]
+    highest_profit = region_profit.iloc[0]
+
+    result = {
+        "region_profit": region_profit,
+        "highest_profit_region": str(highest_region),
+        "highest_total_profit": float(highest_profit),
+    }
+
+else:
+
+    result = {
+        "message": "No region-level profit data is available."
+    }
+'''
+
+        return code
+
+    # ========================================================
+    # 9. MISSING VALUES
+    # ========================================================
+
+    if (
+        (
+            "missing" in step_lower
+            or "null" in step_lower
+            or "incomplete" in step_lower
+        )
+        and "mean" not in step_lower
+        and "average" not in step_lower
+    ):
+
+        code += '''
+missing_count = df.isnull().sum()
+
+missing_percentage = (
+    df.isnull().mean() * 100
+).round(2)
+
+result = pd.DataFrame({
+    "missing_count": missing_count,
+    "missing_percentage": missing_percentage,
+})
+'''
+
+        return code
+
+    # ========================================================
+    # 10. NUMERICAL DESCRIPTIVE STATISTICS
+    # ========================================================
+
+    if (
+        "descriptive statistics" in step_lower
+        or "descriptive analysis" in step_lower
+        or (
+            "numerical statistics" in step_lower
+            and "distribution" not in step_lower
+        )
+    ):
+
+        code += '''
+numeric_df = df.select_dtypes(
+    include="number"
+)
+
+result = numeric_df.describe().T
+
+result["median"] = numeric_df.median()
+
+result["skewness"] = numeric_df.skew()
+
+result["missing_count"] = numeric_df.isnull().sum()
+
+result["missing_percentage"] = (
+    numeric_df.isnull().mean() * 100
+).round(2)
+'''
+
+        return code
+
+    # ========================================================
+    # 11. DISTRIBUTION AND SKEWNESS
+    # ========================================================
+
+    if (
+        "skewness" in step_lower
+        or "distribution" in step_lower
+        or "distributions" in step_lower
+    ):
+
+        code += '''
+numeric_df = df.select_dtypes(
+    include="number"
+)
+
+result = pd.DataFrame({
+    "count": numeric_df.count(),
+    "mean": numeric_df.mean(),
+    "median": numeric_df.median(),
+    "std": numeric_df.std(),
+    "min": numeric_df.min(),
+    "max": numeric_df.max(),
+    "skewness": numeric_df.skew(),
+    "missing_count": numeric_df.isnull().sum(),
+})
+'''
+
+        return code
+
+
+
+    # ========================================================
+    # GENERAL GROUPED MEAN / AVERAGE
+    # Must run before subscription-specific and scalar-mean rules.
+    # ========================================================
+    grouped_mean_cues = (
+        "compare", "comparison", "across", "between", "group",
+        "grouped", "group means", "separately", "with and without",
+        "for each", "by ",
+    )
+    asks_for_mean = any(
+        word in step_lower.split() for word in ("mean", "average", "avg")
+    )
+    asks_for_grouping = any(cue in step_lower for cue in grouped_mean_cues)
+
+    if asks_for_mean and asks_for_grouping:
+        try:
+            available_columns = pd.read_csv(filepath, nrows=0).columns.tolist()
+        except Exception:
+            available_columns = []
+
+        def _column_words(value):
+            return re.findall(r"[a-z0-9]+", str(value).lower())
+
+        prompt_words = _column_words(step_text)
+        matched_columns = []
+        for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+            column_words = _column_words(column)
+            width = len(column_words)
+            if width and any(
+                prompt_words[index:index + width] == column_words
+                for index in range(len(prompt_words) - width + 1)
+            ):
+                matched_columns.append(column)
+
+        profile_columns = (data_profile or {}).get("columns", {})
+        numeric_matched = [
+            column for column in matched_columns
+            if isinstance(profile_columns.get(column), dict)
+            and any(
+                token in str(profile_columns[column].get("dtype", "")).lower()
+                for token in ("int", "float", "numeric")
+            )
+        ]
+        metric_column = numeric_matched[0] if numeric_matched else None
+
+        if metric_column is None:
+            try:
+                sample_df = pd.read_csv(filepath, nrows=100)
+                numeric_matched = [
+                    column for column in matched_columns
+                    if column in sample_df.columns
+                    and pd.to_numeric(sample_df[column], errors="coerce").notna().sum() > 0
+                    and (
+                        pd.api.types.is_numeric_dtype(sample_df[column])
+                        or pd.to_numeric(sample_df[column], errors="coerce").notna().mean() >= 0.8
+                    )
+                ]
+                metric_column = numeric_matched[0] if numeric_matched else None
+            except Exception:
+                metric_column = None
+
+        # The pipeline may provide task-analyzed target columns. When a plan
+        # step describes reporting means for each group but omits the metric
+        # name, use a single numeric target column other than the group field.
+        # Never guess when there are zero or multiple candidates.
+        if metric_column is None and isinstance(target_columns, (list, tuple)):
+            try:
+                sample_df = pd.read_csv(filepath, nrows=100)
+                target_numeric_candidates = [
+                    column for column in target_columns
+                    if column in sample_df.columns
+                    and pd.to_numeric(sample_df[column], errors="coerce").notna().sum() > 0
+                    and (
+                        pd.api.types.is_numeric_dtype(sample_df[column])
+                        or pd.to_numeric(sample_df[column], errors="coerce").notna().mean() >= 0.8
+                    )
+                ]
+                if len(target_numeric_candidates) == 1:
+                    metric_column = target_numeric_candidates[0]
+            except Exception:
+                metric_column = None
+
+        group_column = None
+        group_patterns = (
+            r"\bby\s+['\"]?([^'\".,;]+?)['\"]?(?:\s+and\s+|\s+calculate\b|\s+compare\b|\s*$)",
+            r"\bfor\s+each\s+['\"]?([^'\".,;]+?)['\"]?\s+categor",
+            r"\bgroup(?:ed)?\s+(?:the\s+data\s+)?by\s+['\"]?([^'\".,;]+?)['\"]?(?:\s+and\s+|\s*$)",
+            r"\bwith\s+and\s+without\s+([a-z0-9 _-]+)",
+        )
+        requested_group_phrase = None
+        for pattern in group_patterns:
+            match = re.search(pattern, str(step_text), flags=re.IGNORECASE)
+            if match:
+                requested_group_phrase = match.group(1).strip()
+                break
+
+        if requested_group_phrase:
+            group_words = _column_words(requested_group_phrase)
+            for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+                column_words = _column_words(column)
+                if column_words and (
+                    column.lower() == requested_group_phrase.lower()
+                    or column_words == group_words
+                    or any(
+                        group_words[index:index + len(column_words)] == column_words
+                        for index in range(max(0, len(group_words) - len(column_words) + 1))
+                    )
+                ):
+                    if column != metric_column:
+                        group_column = column
+                        break
+
+        if group_column is None:
+            non_metric_matches = [column for column in matched_columns if column != metric_column]
+            if len(non_metric_matches) == 1:
+                group_column = non_metric_matches[0]
+
+        # Independent-recomputation plan steps may say "recompute the
+        # grouped means" without repeating either column name. In that case,
+        # use the task analyzer's target columns only when they identify one
+        # unambiguous non-metric grouping column.
+        if (
+            group_column is None
+            and metric_column is not None
+            and isinstance(target_columns, (list, tuple))
+        ):
+            target_group_candidates = [
+                column for column in target_columns
+                if column in available_columns and column != metric_column
+            ]
+            if len(target_group_candidates) == 1:
+                group_column = target_group_candidates[0]
+
+        if metric_column is not None and group_column is not None:
+            code += f'''
+metric_column = {metric_column!r}
+group_column = {group_column!r}
+required_columns = [metric_column, group_column]
+missing_columns = [column for column in required_columns if column not in df.columns]
+
+if missing_columns:
+    result = {{
+        "status": "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": metric_column,
+        "group_column": group_column,
+        "reason": "Required columns missing: " + ", ".join(missing_columns),
+    }}
+else:
+    metric_values = pd.to_numeric(df[metric_column], errors="coerce")
+    group_values = df[group_column].astype("string").str.strip()
+    normalized_groups = group_values.fillna("Missing")
+    normalized_groups = normalized_groups.mask(normalized_groups == "", "Missing")
+    working = pd.DataFrame({{
+        "_group": normalized_groups,
+        "_metric": metric_values,
+    }})
+    grouped = working.groupby("_group", dropna=False).agg(
+        row_count=("_group", "size"),
+        valid_value_count=("_metric", "count"),
+        mean_value=("_metric", "mean"),
+    )
+    group_results = {{
+        str(group): {{
+            "row_count": int(row["row_count"]),
+            "valid_value_count": int(row["valid_value_count"]),
+            "mean_value": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+            "mean": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+        }}
+        for group, row in grouped.iterrows()
+    }}
+    valid_group_means = {{
+        group: values["mean_value"]
+        for group, values in group_results.items()
+        if values["mean_value"] is not None
+    }}
+    mean_difference = None
+    if len(valid_group_means) == 2:
+        group_names = list(valid_group_means)
+        mean_difference = float(valid_group_means[group_names[0]] - valid_group_means[group_names[1]])
+    mean_difference_yes_minus_no = None
+    normalized_group_names = {{str(name).strip().lower(): name for name in valid_group_means}}
+    if "yes" in normalized_group_names and "no" in normalized_group_names:
+        yes_name = normalized_group_names["yes"]
+        no_name = normalized_group_names["no"]
+        mean_difference_yes_minus_no = float(
+            valid_group_means[yes_name] - valid_group_means[no_name]
+        )
+    result = {{
+        "status": "PASS" if len(valid_group_means) >= 2 else "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": metric_column,
+        "group_column": group_column,
+        "group_results": group_results,
+        "group_count": int(len(group_results)),
+        "mean_difference": mean_difference,
+        "mean_difference_yes_minus_no": mean_difference_yes_minus_no,
+        "dataset_row_count": int(len(df)),
+        "analyzed_row_count": int(len(working)),
+        "reason": None if len(valid_group_means) >= 2 else "At least two groups with valid numeric means are required.",
+    }}
+'''
+            return code
+
+        code += '''
+result = {
+    "status": "UNSUPPORTED",
+    "analysis_type": "grouped_mean_analysis",
+    "reason": "Could not identify both the explicitly requested numeric metric and grouping column. No overall mean was substituted.",
+    "available_columns": df.columns.tolist(),
+}
+'''
+        return code
+
+    # ========================================================
+    # GROUPED MEAN: SUBSCRIBED VS NOT SUBSCRIBED
+    # ========================================================
+
+    grouped_mean_request = (
+        any(word in step_lower.split() for word in ("mean", "average", "avg"))
+        and any(token in step_lower for token in ("subscrib", "subscription"))
+        and any(
+            token in step_lower
+            for token in (
+                "compare", "comparison", "across", "between", "group",
+                "grouped", "by", "separately", "group means",
+                "higher than", "lower than", "greater than", "less than",
+                "more than", "fewer than", "validate this claim", "check this claim",
+            )
+        )
+    )
+
+    if grouped_mean_request:
+        # Resolve the metric from the requested plan step. Never default to balance.
+        available_columns = []
+        profile_columns = (data_profile or {}).get("columns", {})
+        if isinstance(profile_columns, dict):
+            available_columns = list(profile_columns.keys())
+        if not available_columns:
+            try:
+                available_columns = list(pd.read_csv(filepath, nrows=0).columns)
+            except Exception:
+                available_columns = []
+        numeric_candidates = [
+            column for column in available_columns
+            if str(column).strip().lower() not in {"y", "conversion"}
+            and (
+                not isinstance(profile_columns, dict)
+                or not profile_columns
+                or profile_columns.get(column, {}).get("role") == "continuous"
+            )
+        ]
+        matched_metrics = [
+            column for column in numeric_candidates
+            if re.search(
+                r"(?<![\w])" + re.escape(str(column).replace("_", " ").lower()) + r"(?![\w])",
+                step_lower,
+            )
+        ]
+        if not matched_metrics:
+            aliases = {"account balance": "balance", "call duration": "duration"}
+            matched_metrics = [
+                destination for alias, destination in aliases.items()
+                if destination in numeric_candidates
+                and re.search(r"(?<![\w])" + re.escape(alias) + r"(?![\w])", step_lower)
+            ]
+        requested_metric_column = (
+            max(matched_metrics, key=lambda value: len(str(value)))
+            if matched_metrics else None
+        )
+        if requested_metric_column is None:
+            code += """result = {
+    "status": "UNSUPPORTED",
+    "analysis_type": "grouped_mean_analysis",
+    "reason": "The requested numeric metric could not be matched to a dataset column. No substitute metric was used.",
+    "available_columns": df.columns.tolist(),
+}
+"""
+            return code
+
+        metric_literal = repr(str(requested_metric_column))
+        code += f'''group_column = "y" if "y" in df.columns else (
+    "conversion" if "conversion" in df.columns else None
+)
+required_columns = [{metric_literal}]
+if group_column is None:
+    result = {{
+        "status": "FAIL",
+        "analysis_type": "grouped_mean_analysis",
+        "metric_column": {metric_literal},
+        "reason": "No supported subscription grouping column ('y' or 'conversion') was found.",
+        "available_columns": df.columns.tolist(),
+    }}
+else:
+    missing_columns = [column for column in required_columns if column not in df.columns]
+    if missing_columns:
+        result = {{
+            "status": "FAIL",
+            "analysis_type": "grouped_mean_analysis",
+            "metric_column": {metric_literal},
+            "group_column": group_column,
+            "reason": "Required columns missing: " + ", ".join(missing_columns),
+        }}
+    else:
+        metric_column = {metric_literal}
+        if group_column == "y":
+            subscription_status = df["y"].astype("string").str.strip().str.lower()
+        else:
+            conversion_values = pd.to_numeric(df["conversion"], errors="coerce")
+            subscription_status = conversion_values.map({{0: "no", 1: "yes"}}).astype("string")
+        working = pd.DataFrame({{
+            "subscription_status": subscription_status,
+            "metric_value": pd.to_numeric(df[metric_column], errors="coerce"),
+        }})
+        working = working[working["subscription_status"].isin(["yes", "no"])].copy()
+        grouped = working.groupby("subscription_status").agg(
+            row_count=("subscription_status", "size"),
+            valid_value_count=("metric_value", "count"),
+            mean_value=("metric_value", "mean"),
+        )
+        group_results = {{
+            str(status): {{
+                "row_count": int(row["row_count"]),
+                "valid_value_count": int(row["valid_value_count"]),
+                "mean_value": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+                "mean": float(row["mean_value"]) if pd.notna(row["mean_value"]) else None,
+            }}
+            for status, row in grouped.iterrows()
+        }}
+        both_groups_available = (
+            "yes" in group_results and "no" in group_results
+            and group_results["yes"]["mean_value"] is not None
+            and group_results["no"]["mean_value"] is not None
+        )
+        result = {{
+            "status": "PASS" if both_groups_available else "FAIL",
+            "analysis_type": "grouped_mean_analysis",
+            "metric_column": metric_column,
+            "group_column": group_column,
+            "group_results": group_results,
+            "mean_difference_yes_minus_no": (
+                group_results["yes"]["mean_value"] - group_results["no"]["mean_value"]
+                if both_groups_available else None
+            ),
+            "dataset_row_count": int(len(df)),
+            "analyzed_row_count": int(len(working)),
+        }}
+'''
+        return code
+
+
+
+    # ========================================================
+    # SCALAR MAXIMUM / MINIMUM
+    # ========================================================
+    extrema_max_intent = bool(re.search(
+        r"\b(maximum|max|highest\s+value|largest\s+value|greatest\s+value)\b",
+        step_lower,
+    ))
+    extrema_min_intent = bool(re.search(
+        r"\b(minimum|min|smallest\s+value|lowest\s+value|least\s+value)\b",
+        step_lower,
+    ))
+    if extrema_max_intent or extrema_min_intent:
+        operation = "maximum" if extrema_max_intent else "minimum"
+        try:
+            available_columns = pd.read_csv(filepath, nrows=0).columns.tolist()
+        except Exception:
+            available_columns = []
+        match = re.search(r"""(?:in|of)\s+['"]([^'"]+)['"]""", str(step_text), re.IGNORECASE)
+        requested_column = match.group(1).strip() if match else None
+        actual_column = None
+        if requested_column:
+            for column in available_columns:
+                if str(column).strip().lower() == requested_column.lower():
+                    actual_column = column
+                    break
+        if actual_column is None:
+            def _column_words(value):
+                return re.findall(r"[a-z0-9]+", str(value).lower())
+            prompt_words = _column_words(step_text)
+            for column in sorted(available_columns, key=lambda item: len(_column_words(item)), reverse=True):
+                column_words = _column_words(column)
+                width = len(column_words)
+                if width and any(
+                    prompt_words[index:index + width] == column_words
+                    for index in range(len(prompt_words) - width + 1)
+                ):
+                    actual_column = column
+                    break
+        if actual_column is None:
+            code += f"""
+result = {{
+    "status": "UNSUPPORTED",
+    "analysis_type": "extrema_analysis",
+    "operation": {operation!r},
+    "reason": "Could not identify the requested metric column.",
+    "available_columns": df.columns.tolist(),
+}}
+"""
+            return code
+        code += f"""
+requested_column = {actual_column!r}
+numeric_values = pd.to_numeric(df[requested_column], errors="coerce").dropna()
+extreme_value = (
+    float(numeric_values.max()) if not numeric_values.empty else None
+) if {operation!r} == "maximum" else (
+    float(numeric_values.min()) if not numeric_values.empty else None
+)
+result = {{
+    "status": "PASS" if not numeric_values.empty else "FAIL",
+    "analysis_type": "extrema_analysis",
+    "operation": {operation!r},
+    "metric_column": requested_column,
+    "value": extreme_value,
+    "maximum": extreme_value if {operation!r} == "maximum" else None,
+    "minimum": extreme_value if {operation!r} == "minimum" else None,
+    "valid_value_count": int(numeric_values.count()),
+    "dataset_row_count": int(len(df)),
+    "reason": None if not numeric_values.empty else "No valid numeric values were found.",
+}}
+"""
+        return code
+
+
+    # ========================================================
+    # 12. GENERAL MEAN / AVERAGE
+    # ========================================================
+
+    if any(
+        word in step_lower.split()
+        for word in ("mean", "average", "avg")
+    ):
+
+
+        # Read column names from the actual dataset.
+        try:
+            available_columns = pd.read_csv(
+                filepath,
+                nrows=0
+            ).columns.tolist()
+        except Exception:
+            available_columns = []
+
+        # First support explicitly quoted column names.
+        match = re.search(
+            r"""(?:in|of)\s+['"]([^'"]+)['"]""",
+            str(step_text),
+            re.IGNORECASE
+        )
+
+        requested_column = (
+            match.group(1).strip()
+            if match
+            else None
+        )
+
+        actual_column = None
+
+        if requested_column:
+            for column in available_columns:
+                if column.strip().lower() == requested_column.lower():
+                    actual_column = column
+                    break
+
+        # Otherwise, match an actual column name mentioned
+        # in the prompt. Match longer column names first.
+        if actual_column is None and not requested_column:
+
+            def words(value):
+                return re.findall(
+                    r"[a-z0-9]+",
+                    str(value).lower()
+                )
+
+            prompt_words = words(step_text)
+
+            for column in sorted(
+                available_columns,
+                key=lambda item: len(words(item)),
+                reverse=True
+            ):
+                column_words = words(column)
+                width = len(column_words)
+
+                if not width:
+                    continue
+
+                for index in range(
+                    len(prompt_words) - width + 1
+                ):
+                    if prompt_words[index:index + width] == column_words:
+                        actual_column = column
+                        break
+
+                if actual_column is not None:
+                    break
+
+        if actual_column is None:
+            code += '''
+result = {
+    "status": "UNSUPPORTED",
+    "reason": "Could not identify a matching dataset column in the request.",
+    "available_columns": df.columns.tolist(),
+}
+'''
+            return code
+
+
+        # Generate a numeric mean after applying requested filters.
+        code += f'''
+requested_column = {actual_column!r}
+request_text = {step_text.lower()!r}
+filtered_df = df.copy()
+
+# Apply marital-status filters when explicitly requested.
+if "single" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "single"
+    ]
+elif "married" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "married"
+    ]
+elif "divorced" in request_text and "marital" in filtered_df.columns:
+    filtered_df = filtered_df[
+        filtered_df["marital"].astype("string").str.strip().str.lower() == "divorced"
+    ]
+
+# Apply a month filter when a month is explicitly requested.
+month_aliases = {{
+    "january": "jan", "february": "feb", "march": "mar",
+    "april": "apr", "may": "may", "june": "jun",
+    "july": "jul", "august": "aug", "september": "sep",
+    "october": "oct", "november": "nov", "december": "dec"
+}}
+requested_month = None
+for month_name, month_abbr in month_aliases.items():
+    if month_name in request_text:
+        requested_month = month_abbr
+        break
+
+if requested_month and "month" in filtered_df.columns:
+    month_values = filtered_df["month"].astype("string").str.strip().str.lower()
+    filtered_df = filtered_df[
+        month_values.isin([requested_month, requested_month + "ust"])
+    ]
+
+if requested_column not in filtered_df.columns:
+    result = {{
+        "status": "FAIL",
+        "analysis_type": "mean_analysis",
+        "reason": "Requested metric column was not found.",
+        "metric_column": requested_column
+    }}
+else:
+    values = pd.to_numeric(filtered_df[requested_column], errors="coerce")
+    valid_values = values.dropna()
+
+    result = {{
+        "status": "PASS" if not valid_values.empty else "FAIL",
+        "analysis_type": "mean_analysis",
+        "metric_column": requested_column,
+        "mean": float(valid_values.mean()) if not valid_values.empty else None,
+        "valid_value_count": int(valid_values.count()),
+        "dataset_row_count": int(len(df)),
+        "filtered_row_count": int(len(filtered_df))
+    }}
+'''
+        return code
+
+    # ========================================================
+    # GENERAL DATASET SUMMARY
+    # ========================================================
+    if (
+        "summarize" in step_lower
+        or "summarise" in step_lower
+        or "summary" in step_lower
+    ) and any(
+        word in step_lower
+        for word in ("dataset", "data", "structure", "characteristics", "overview")
+    ):
+        code += """
+result = {
+    "status": "PASS",
+    "analysis_type": "dataset_summary",
+    "row_count": int(df.shape[0]),
+    "column_count": int(df.shape[1]),
+    "columns": df.columns.tolist(),
+    "column_types": {
+        str(column): str(dtype)
+        for column, dtype in df.dtypes.items()
+    },
+    "missing_cells": int(df.isna().sum().sum()),
+    "duplicate_rows": int(df.duplicated().sum()),
+}
+"""
+        return code
+
+    # ========================================================
+    # ISOLATION FOREST ANOMALY DETECTION
+    # ========================================================
+    if (
+        "isolation forest" in step_lower
+        or (
+            any(word in step_lower for word in ("detect", "identify", "find"))
+            and any(word in step_lower for word in ("anomal", "outlier"))
+            and any(word in step_lower for word in ("multivariate", "across numeric", "numeric features"))
+        )
+    ):
+        code += """
+from sklearn.ensemble import IsolationForest
+from sklearn.impute import SimpleImputer
+
+numeric_df = df.select_dtypes(include=["number"]).copy()
+numeric_df = numeric_df.replace([np.inf, -np.inf], np.nan)
+usable_columns = [
+    column for column in numeric_df.columns
+    if numeric_df[column].notna().any()
+    and numeric_df[column].nunique(dropna=True) > 1
+]
+
+if len(df) < 3:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "reason": "At least three rows are required for anomaly detection.",
+        "row_count": int(len(df)),
+    }
+elif not usable_columns:
+    result = {
+        "status": "FAIL",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "reason": "No suitable numeric features were found.",
+        "available_columns": df.columns.tolist(),
+    }
+else:
+    feature_frame = numeric_df[usable_columns]
+    imputer = SimpleImputer(strategy="median")
+    feature_values = imputer.fit_transform(feature_frame)
+    contamination_value = 0.05
+    model = IsolationForest(
+        n_estimators=200,
+        contamination=contamination_value,
+        random_state=42,
+    )
+    predicted_labels = model.fit_predict(feature_values)
+    anomaly_scores = model.decision_function(feature_values)
+    anomaly_mask = predicted_labels == -1
+    anomaly_rows = df.loc[anomaly_mask].copy()
+    anomaly_rows["anomaly_label"] = "anomaly"
+    anomaly_rows["anomaly_score"] = anomaly_scores[anomaly_mask]
+    anomaly_rows = anomaly_rows.sort_values(
+        "anomaly_score", ascending=True
+    )
+    anomaly_count = int(anomaly_mask.sum())
+    sample_limit = 10
+    anomaly_sample = anomaly_rows.head(sample_limit).copy()
+    result = {
+        "status": "PASS",
+        "analysis_type": "anomaly_detection",
+        "method": "IsolationForest",
+        "feature_columns": usable_columns,
+        "row_count": int(len(df)),
+        "anomaly_count": anomaly_count,
+        "normal_count": int(len(df) - anomaly_count),
+        "anomaly_percentage": round(float(anomaly_mask.mean() * 100), 2),
+        "contamination": contamination_value,
+        "sample_limit": sample_limit,
+        "sample_anomalies": anomaly_sample,
+        "sample_note": (
+            f"Showing {len(anomaly_sample)} of {anomaly_count} detected anomalies."
+        ),
+    }
+"""
+        return code
+
+    # ========================================================
+    # SUMMARY OF ANOMALOUS OBSERVATIONS IN A NAMED COLUMN
+    # ========================================================
+    if (
+        any(word in step_lower for word in ("summarize", "summarise", "summary"))
+        and any(word in step_lower for word in ("anomal", "outlier", "unusual"))
+    ):
+        # Extract a quoted column name without shadowing the existing local `re` import.
+        quoted_column_match = __import__("re").search(
+            r"""(?:in|for|from)\s+['"]([^'"]+)['"]""",
+            str(step_text),
+            __import__("re").IGNORECASE,
+        )
+        requested_column = (
+            quoted_column_match.group(1).strip()
+            if quoted_column_match
+            else None
+        )
+        code += f"""
+requested_column = {requested_column!r}
+if requested_column is None:
+    lowered_step = {step_lower!r}
+    candidates = sorted(df.columns, key=lambda item: len(str(item)), reverse=True)
+    requested_column = next(
+        (column for column in candidates if str(column).lower() in lowered_step),
+        None,
+    )
+
+if requested_column not in df.columns:
+    result = {{
+        "status": "UNSUPPORTED",
+        "analysis_type": "anomaly_summary",
+        "reason": "Could not identify the requested anomaly column.",
+        "requested_column": requested_column,
+        "available_columns": df.columns.tolist(),
+    }}
+else:
+    values = pd.to_numeric(df[requested_column], errors="coerce")
+    valid_values = values.replace([np.inf, -np.inf], np.nan).dropna()
+    if valid_values.empty:
+        result = {{
+            "status": "FAIL",
+            "analysis_type": "anomaly_summary",
+            "column": requested_column,
+            "reason": "The requested column contains no valid numeric values.",
+        }}
+    else:
+        q1 = float(valid_values.quantile(0.25))
+        q3 = float(valid_values.quantile(0.75))
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        anomaly_mask = values.notna() & (
+            (values < lower_bound) | (values > upper_bound)
+        )
+        anomaly_rows = df.loc[anomaly_mask].copy()
+        anomaly_rows["anomaly_value"] = values.loc[anomaly_mask]
+        anomaly_rows["anomaly_reason"] = "Outside 1.5*IQR bounds"
+        result = {{
+            "status": "PASS",
+            "analysis_type": "anomaly_summary",
+            "method": "IQR",
+            "column": requested_column,
+            "row_count": int(len(df)),
+            "valid_value_count": int(valid_values.count()),
+            "anomaly_count": int(anomaly_mask.sum()),
+            "lower_bound": float(lower_bound),
+            "upper_bound": float(upper_bound),
+            "anomaly_min": float(anomaly_rows["anomaly_value"].min()) if not anomaly_rows.empty else None,
+            "anomaly_max": float(anomaly_rows["anomaly_value"].max()) if not anomaly_rows.empty else None,
+            "anomalies": anomaly_rows,
+        }}
+"""
+        return code
+
+    # ========================================================
+    # SAFE FALLBACK FOR UNIMPLEMENTED REQUESTS
+    # ========================================================
+    code += """
+result = {
+    "status": "UNSUPPORTED",
+    "reason": "No code-generation rule supports this request yet.",
+    "requested_step": """ + repr(step_text) + """,
+    "available_columns": df.columns.tolist(),
+}
+"""
+    return code
+
+
+def _select_spec_for_step(step_text, spec):
+    terms = {
+        "mean": ("average", "mean", "avg"), "median": ("median",),
+        "sum": ("sum", "total"), "count": ("count", "number of", "how many"),
+        "min": ("minimum", "smallest", "lowest"), "max": ("maximum", "largest", "highest"),
+        "std": ("standard deviation", "std"), "variance": ("variance",),
+        "nunique": ("distinct", "unique"), "missing_values": ("missing", "null"),
+        "duplicate_count": ("duplicate",), "describe": ("describe", "summary", "profile"),
+        "correlation": ("correlation", "correlated", "relationship"),
+        "outlier_detection": ("outlier", "anomaly"), "time_trend": ("trend", "over time", "monthly", "weekly", "yearly"),
+        "rank": ("rank", "top ", "bottom "),
+    }
+    ops = spec.get("operations") or []
+    step_lower = str(step_text or "").casefold()
+    if step_lower.startswith("apply all explicitly requested filters"):
+        chosen = dict(spec)
+        chosen["operations"] = ["filter_only"]
+        return chosen
+    if "independently recompute" in step_lower:
+        chosen = dict(spec)
+        return chosen
+    if len(ops) <= 1:
+        selected = ops
+    else:
+        text = str(step_text or "").casefold()
+        selected = [op for op in ops if any(t in text for t in terms.get(op, ()))]
+    if "rank" in selected and spec.get("group_by"):
+        aggregate_operation = next(
+            (op for op in ("sum", "mean", "count", "max", "min") if op in ops),
+            None,
+        )
+        if aggregate_operation:
+            selected = [aggregate_operation] + [op for op in selected if op != aggregate_operation]
+    if not selected:
+        return None
+    chosen = dict(spec)
+    chosen["operations"] = selected
+    return chosen
+
+
+def _build_spec_driven_code(step_text, filepath, spec):
+    payload = {k: spec.get(k, default) for k, default in (
+        ("operations", []), ("metrics", []), ("group_by", []), ("filters", []),
+        ("statistics", []), ("time", {}), ("sorting", {})
+    )}
+    template = r'''import pandas as pd
+import numpy as np
+
+df = pd.read_csv({filepath})
+spec = {spec}
+requested_step = {step}
+
+def unsupported(message):
+    return {{"status":"UNSUPPORTED","analysis_type":"specification_driven",
+             "reason":message,"requested_step":requested_step,
+             "available_columns":df.columns.tolist()}}
+
+try:
+    ops, metrics = spec["operations"], spec.get("metrics", [])
+    groups, filters = spec.get("group_by", []), spec.get("filters", [])
+    supported = {{"mean","median","sum","count","min","max","std","variance","nunique",
+                 "missing_values","duplicate_count","describe","correlation",
+                 "outlier_detection","time_trend","rank","filter_only"}}
+    required = metrics + groups + [f.get("column") for f in filters]
+    missing = [c for c in required if c and c not in df.columns]
+    if missing: result = unsupported("Missing columns: " + ", ".join(dict.fromkeys(missing)))
+    elif any(op not in supported for op in ops): result = unsupported("Unsupported requested operation.")
+    else:
+        work = df.copy()
+        for f in filters:
+            c, op, v = f["column"], f["operator"], f["value"]
+            s = pd.to_numeric(work[c], errors="coerce")
+            masks = {{">":s>v, ">=":s>=v, "<":s<v, "<=":s<=v, "==":s==v, "!=":s!=v}}
+            if op not in masks: raise ValueError("Unsupported filter operator: " + str(op))
+            work = work.loc[masks[op]].copy()
+        out = {{}}
+        if "filter_only" in ops:
+            out["filter_summary"] = {{"input_rows": int(len(df)), "filtered_rows": int(len(work)),
+                "rows_removed": int(len(df) - len(work)), "filters_applied": filters}}
+        if "missing_values" in ops:
+            out["missing_values"] = {{"total_missing_cells":int(work.isna().sum().sum()),
+                "by_column":{{str(k):int(v) for k,v in work.isna().sum().items()}}}}
+        if "duplicate_count" in ops: out["duplicate_count"] = int(work.duplicated().sum())
+        if "describe" in ops: out["describe"] = work.describe(include="all").to_dict()
+        agg = [o for o in ops if o in {{"mean","median","sum","count","min","max","std","variance","nunique"}}]
+        def calc(s, op):
+            if op in ("mean","median","sum","std","variance") and not pd.api.types.is_numeric_dtype(s):
+                raise TypeError("Numeric aggregation requested for non-numeric metric.")
+            if op == "mean": return pd.to_numeric(s,errors="coerce").mean()
+            if op == "median": return pd.to_numeric(s,errors="coerce").median()
+            if op == "sum": return pd.to_numeric(s,errors="coerce").sum()
+            if op == "count": return s.count()
+            if op == "min": return s.min()
+            if op == "max": return s.max()
+            if op == "std": return pd.to_numeric(s,errors="coerce").std()
+            if op == "variance": return pd.to_numeric(s,errors="coerce").var()
+            return s.nunique()
+        if agg and not metrics and agg == ["count"]:
+            if groups:
+                out["aggregations"] = work.groupby(groups, dropna=False).size().reset_index(name="row_count").to_dict(orient="records")
+            else:
+                out["aggregations"] = {{"row_count": int(len(work))}}
+        elif agg and not metrics:
+            result = unsupported("No metric column was identified.")
+        elif agg:
+            if groups:
+                rows = []
+                for key, frame in work.groupby(groups,dropna=False):
+                    key = key if isinstance(key,tuple) else (key,)
+                    row = dict(zip(groups,key))
+                    for m in metrics:
+                        for op in agg:
+                            val = calc(frame[m],op)
+                            row[m+"__"+op] = None if pd.isna(val) else (int(val) if op in ("count","nunique") else float(val))
+                    rows.append(row)
+                out["aggregations"] = rows
+            else:
+                vals = {{}}
+                for m in metrics:
+                    for op in agg:
+                        val = calc(work[m],op)
+                        vals[m+"__"+op] = None if pd.isna(val) else (int(val) if op in ("count","nunique") else float(val))
+                out["aggregations"] = vals
+        if "correlation" in ops:
+            if len(metrics)<2 or not all(pd.api.types.is_numeric_dtype(work[c]) for c in metrics):
+                result = unsupported("Correlation requires at least two identified numeric metrics.")
+            else:
+                methods = spec.get("statistics") or ["pearson"]
+                out["correlation"] = {{m:work[metrics].corr(method=m).to_dict() for m in methods if m in ("pearson","spearman")}}
+        if "outlier_detection" in ops:
+            if not metrics: result = unsupported("Outlier detection requires an identified metric.")
+            else:
+                found = {{}}
+                for m in metrics:
+                    s = pd.to_numeric(work[m],errors="coerce").dropna()
+                    q1,q3=s.quantile([.25,.75]); iqr=q3-q1; lo,hi=q1-1.5*iqr,q3+1.5*iqr
+                    found[m]={{"method":"IQR","lower_bound":float(lo),"upper_bound":float(hi),
+                        "outlier_count":int(((s<lo)|(s>hi)).sum()),"valid_count":int(s.count())}}
+                out["outlier_detection"] = found
+        if "time_trend" in ops:
+            c=spec.get("time",{{}}).get("column"); grain=spec.get("time",{{}}).get("grain") or "M"
+            if not c or c not in work.columns or not metrics: result=unsupported("Time trend requires a resolved date column and metric.")
+            else:
+                dates=pd.to_datetime(work[c],errors="coerce"); temp=work.loc[dates.notna()].copy()
+                temp["_period"]=dates.loc[dates.notna()].dt.to_period(grain).astype(str); rows=[]
+                for period,frame in temp.groupby("_period",sort=True):
+                    row={{"period":period}}
+                    for m in metrics: row[m+"__sum"]=float(pd.to_numeric(frame[m],errors="coerce").sum())
+                    rows.append(row)
+                out["time_trend"]=rows
+        if "rank" in ops:
+            if not metrics: result=unsupported("Ranking requires an identified metric.")
+            elif groups and "aggregations" in out:
+                m=metrics[0]; key=m+"__"+(agg[0] if agg else "mean")
+                asc=spec.get("sorting",{{}}).get("direction")=="ascending"
+                rows=sorted(out["aggregations"],key=lambda r:r.get(key) if r.get(key) is not None else float("-inf"),reverse=not asc)
+                limit=spec.get("sorting",{{}}).get("limit"); out["ranking"]=rows[:limit] if limit else rows
+            else:
+                m=metrics[0]; asc=spec.get("sorting",{{}}).get("direction")=="ascending"
+                ranked=work.sort_values(m,ascending=asc,na_position="last")
+                limit=spec.get("sorting",{{}}).get("limit")
+                out["ranking"]=ranked.head(limit).to_dict(orient="records") if limit else ranked.to_dict(orient="records")
+        if "result" not in locals():
+            result={{"status":"PASS","analysis_type":"specification_driven","operations":ops,
+                "metrics":metrics,"group_by":groups,"filters_applied":filters,
+                "input_rows":int(len(df)),"analyzed_rows":int(len(work)),"operation_results":out}}
+except Exception as exc:
+    result={{"status":"FAIL","analysis_type":"specification_driven",
+             "reason":type(exc).__name__+": "+str(exc),"requested_step":requested_step}}
+'''
+    return template.format(filepath=repr(os.path.abspath(filepath)), spec=repr(payload), step=repr(str(step_text)))
+
+
+def generate_code_mock(step_text, filepath, data_profile=None, feedback=None,
+                       target_columns=None, analytical_spec=None):
+    if isinstance(analytical_spec, dict):
+        if str(step_text or "").strip().casefold().startswith("stop:"):
+            return _generate_code_legacy(step_text, filepath, data_profile, feedback, target_columns, None)
+        if analytical_spec.get("status") == "REVIEW":
+            reason = "; ".join(analytical_spec.get("issues", [])) or "The request needs clarification."
+            return ("import pandas as pd\n" + f"df=pd.read_csv({os.path.abspath(filepath)!r})\n" +
+                    f"result={{'status':'REVIEW','reason':{reason!r},'available_columns':df.columns.tolist()}}\n")
+        selected = _select_spec_for_step(step_text, analytical_spec)
+        if selected:
+            return _build_spec_driven_code(step_text, filepath, selected)
+        return ("import pandas as pd\n" + f"df=pd.read_csv({os.path.abspath(filepath)!r})\n" +
+                "result={'status':'UNSUPPORTED','reason':'Planner step does not map to a requested operation.',"
+                f"'requested_step':{str(step_text)!r},'available_columns':df.columns.tolist()}}\n")
+    return _generate_code_legacy(step_text, filepath, data_profile, feedback, target_columns, analytical_spec)
+
+
+# LOCAL TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    project_root = os.path.dirname(
+        os.path.dirname(
+            os.path.abspath(__file__)
+        )
+    )
+
+    filepath = os.path.join(
+        project_root,
+        "data",
+        "raw",
+        "sales.csv"
+    )
+
+    test_steps = [
+        "Calculate descriptive statistics for numerical columns.",
+        "Check the dataset for missing values.",
+        "Identify most frequent values in categorical columns.",
+        "Analyze distribution and skewness of numerical variables.",
+        "Summarize overall structure and characteristics of dataset.",
+        "Group the data by Region and calculate the total of Total Profit.",
+        "Calculate the Pearson correlation between Units Sold and Total Profit.",
+        "Identify potential outliers using the IQR method for Total Profit.",
+    ]
+
+    print("=" * 70)
+    print("CODE GENERATOR TEST")
+    print("=" * 70)
+
+    for index, step in enumerate(test_steps, start=1):
+
+        print(f"\nTEST STEP {index}:")
+        print(step)
+
+        generated_code = generate_code_mock(
+            step_text=step,
+            filepath=filepath,
+        )
+
+        print("\nGenerated code preview:")
+        print(generated_code[:700])
+
+        # Confirm the generated code is syntactically valid.
+        compile(
+            generated_code,
+            filename=f"<generated_step_{index}>",
+            mode="exec",
+        )
+
+        print("Syntax check: PASS")
+
+    print("\nAll generated-code syntax checks passed.")

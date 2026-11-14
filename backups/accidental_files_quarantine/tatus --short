@@ -1,0 +1,79 @@
+warning: in the working copy of 'src/evidence_mapping_grouped_mean_fixed.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/src/evidence_mapping_grouped_mean_fixed.py b/src/evidence_mapping_grouped_mean_fixed.py[m
+[1mindex c90bd92..a99d691 100644[m
+[1m--- a/src/evidence_mapping_grouped_mean_fixed.py[m
+[1m+++ b/src/evidence_mapping_grouped_mean_fixed.py[m
+[36m@@ -1354,6 +1354,24 @@[m [mdef map_insight_to_evidence([m
+                         {f"{prefix} loan", f"{prefix} loans",[m
+                          f"{prefix} personal loan", f"{prefix} personal loans"}[m
+                     )[m
+[32m+[m
+[32m+[m[32m                # In common bank-marketing datasets, the binary "y" column[m
+[32m+[m[32m                # indicates whether a customer subscribed. Accept those[m
+[32m+[m[32m                # natural-language group labels without assuming this for[m
+[32m+[m[32m                # unrelated grouping columns.[m
+[32m+[m[32m                if column == "y":[m
+[32m+[m[32m                    if positive:[m
+[32m+[m[32m                        aliases.update({[m
+[32m+[m[32m                            "subscriber", "subscribers", "subscribed",[m
+[32m+[m[32m                            "subscribed customers", "customers who subscribed",[m
+[32m+[m[32m                        })[m
+[32m+[m[32m                    else:[m
+[32m+[m[32m                        aliases.update({[m
+[32m+[m[32m                            "non subscriber", "non subscribers",[m
+[32m+[m[32m                            "non-subscriber", "non-subscribers",[m
+[32m+[m[32m                            "not subscribed", "non-subscribed customers",[m
+[32m+[m[32m                            "customers who did not subscribe",[m
+[32m+[m[32m                        })[m
+             return {alias for alias in aliases if alias}[m
+ [m
+         def group_is_described(label):[m
+[36m@@ -1370,6 +1388,7 @@[m [mdef map_insight_to_evidence([m
+                 and any(_close_enough(number, item[2]) for number in numbers)[m
+             )[m
+ [m
+[32m+[m[32m        group_check_statuses = {}[m
+         for check_name, item in ([m
+             ("first_group_mean_mentioned", first_item),[m
+             ("second_group_mean_mentioned", second_item),[m
+[36m@@ -1379,13 +1398,39 @@[m [mdef map_insight_to_evidence([m
+                 and mean_is_mentioned(item)[m
+                 and group_is_described(item[0])[m
+             )[m
+[32m+[m[32m            status = "PASS" if passed else "FAIL"[m
+[32m+[m[32m            group_check_statuses[check_name] = status[m
+             checks.append({[m
+                 "check": check_name,[m
+                 "group_label": item[0] if item is not None else None,[m
+                 "expected_mean": item[2] if item is not None else None,[m
+[31m-                "status": "PASS" if passed else "FAIL",[m
+[32m+[m[32m                "status": status,[m
+             })[m
+ [m
+[32m+[m[32m        # Backward-compatible check names used by earlier tests and callers.[m
+[32m+[m[32m        # Keep generic checks above for arbitrary binary grouped-mean tasks.[m
+[32m+[m[32m        if ([m
+[32m+[m[32m            " ".join(str(grouping_column or "").strip().lower().split()) == "y"[m
+[32m+[m[32m            and first_item is not None[m
+[32m+[m[32m            and second_item is not None[m
+[32m+[m[32m            and first_item[0].strip().lower() in ("no", "false", "0")[m
+[32m+[m[32m            and second_item[0].strip().lower() in ("yes", "true", "1")[m
+[32m+[m[32m        ):[m
+[32m+[m[32m            checks.extend([[m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "check": "non_subscriber_mean_mentioned",[m
+[32m+[m[32m                    "group_label": first_item[0],[m
+[32m+[m[32m                    "expected_mean": first_item[2],[m
+[32m+[m[32m                    "status": group_check_statuses["first_group_mean_mentioned"],[m
+[32m+[m[32m                },[m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "check": "subscriber_mean_mentioned",[m
+[32m+[m[32m                    "group_label": second_item[0],[m
+[32m+[m[32m                    "expected_mean": second_item[2],[m
+[32m+[m[32m                    "status": group_check_statuses["second_group_mean_mentioned"],[m
+[32m+[m[32m                },[m
+[32m+[m[32m            ])[m
+[32m+[m
+         difference = source.get("mean_difference_yes_minus_no")[m
+         if difference is None:[m
+             difference = source.get("mean_difference")[m

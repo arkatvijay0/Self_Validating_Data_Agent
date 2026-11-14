@@ -303,8 +303,24 @@ if st.button("🚀 Analyze Dataset", type="primary", use_container_width=True):
         # Capture output without displaying a green completion banner.
         logs = log_buffer.getvalue()
 
+        # Show Ollama diagnostics separately because the main pipeline output
+        # may be truncated and its Ollama messages may occur before the last 8k.
+        ollama_lines = [
+            line for line in logs.splitlines()
+            if "ollama" in line.lower()
+            or "deterministic mean insight" in line.lower()
+        ]
+        st.subheader("LLM / Ollama diagnostics")
+        if ollama_lines:
+            st.code("\n".join(ollama_lines[-80:]), language="text")
+        else:
+            st.warning(
+                "No Ollama-related message was captured in this run. "
+                "Check whether this run reached the insight-rewriting stage."
+            )
+
         with st.expander("View pipeline output", expanded=False):
-            st.text(logs[-8000:] if logs else "No console output was captured.")
+            st.text(logs[-12000:] if logs else "No console output was captured.")
 
         if REPORT_PATH.exists():
             report_text = REPORT_PATH.read_text(

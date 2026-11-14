@@ -1,0 +1,16 @@
+Order_ID,Region,Product,Sales,Quantity,Profit
+1001,North,Laptop,50000,2,8000
+1002,South,Mobile,20000,4,3000
+1003,East,Laptop,45000,1,7000
+1004,West,Tablet,15000,3,2000
+1005,North,Mobile,25000,5,4000
+1006,South,Laptop,60000,2,10000
+1007,East,Tablet,18000,3,2500
+1008,West,Mobile,22000,4,3500
+1009,North,Tablet,12000,2,1500
+1010,South,Mobile,30000,6,5000
+1011,East,Laptop,55000,2,9000
+1012,West,Tablet,16000,4,2200
+1013,North,Laptop,70000,2,12000
+1014,South,Tablet,14000,2,1800
+1015,East,Mobile,28000,4,4500

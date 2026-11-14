@@ -1092,6 +1092,335 @@ def _validate_conversion_insight(insight, evidence):
 
 
 # ============================================================
+# ISOLATION FOREST ANOMALY CLAIM VALIDATION
+# ============================================================
+
+def _find_isolation_forest_result(obj, depth=0):
+    """Find a validated Isolation Forest result in known evidence containers."""
+    if depth > 7 or not isinstance(obj, dict):
+        return None
+
+    method = re.sub(
+        r"[\s_-]+",
+        "",
+        str(obj.get("method", "")).lower(),
+    )
+    if (
+        method == "isolationforest"
+        and obj.get("analysis_type") in (None, "", "anomaly_detection", "outlier_analysis")
+    ):
+        return obj
+
+    if obj.get("analysis_type") == "anomaly_detection":
+        # A compact result may carry the method in a nested summary.
+        summary = obj.get("summary")
+        if isinstance(summary, dict):
+            summary_method = re.sub(
+                r"[\s_-]+",
+                "",
+                str(summary.get("algorithm", summary.get("method", ""))).lower(),
+            )
+            if summary_method in ("isolationforest", "isolationforestalgorithm"):
+                return obj
+        if obj.get("method") is not None:
+            return obj
+
+    for key in (
+        "primary_result",
+        "result",
+        "supporting_result",
+        "evidence",
+        "validated_result",
+        "summary",
+    ):
+        found = _find_isolation_forest_result(obj.get(key), depth + 1)
+        if found is not None:
+            return found
+
+    return None
+
+
+def _validate_isolation_forest_insight(insight, evidence):
+    """Verify Isolation Forest totals and any anomaly claims stated in the insight."""
+    result = _find_isolation_forest_result(evidence)
+    checks = []
+
+    def record(name, passed, reason):
+        checks.append({
+            "check": name,
+            "status": "PASS" if passed else "FAIL",
+            "reason": None if passed else reason,
+        })
+
+    if result is None:
+        return {
+            "status": "FAIL",
+            "reason": "Validated Isolation Forest result is missing from the evidence.",
+            "checks": [{
+                "check": "validated_isolation_forest_result",
+                "status": "FAIL",
+                "reason": "No Isolation Forest result was found in the evidence containers.",
+            }],
+            "verified_claims": 0,
+            "failed_claims": 1,
+        }
+
+    summary = result.get("summary")
+    if not isinstance(summary, dict):
+        summary = {}
+
+    row_count = result.get("row_count", summary.get("row_count"))
+    anomaly_count = result.get("anomaly_count", summary.get("anomaly_count"))
+    normal_count = result.get("normal_count", summary.get("normal_count"))
+    anomaly_percentage = result.get(
+        "anomaly_percentage",
+        summary.get("anomaly_percentage"),
+    )
+    features = result.get(
+        "feature_columns",
+        summary.get("feature_columns", summary.get("features")),
+    )
+    method = result.get("method", summary.get("algorithm", summary.get("method")))
+    status = result.get("status")
+
+    def as_nonnegative_integer(value):
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not np.isfinite(number) or number < 0 or not number.is_integer():
+            return None
+        return int(number)
+
+    rows = as_nonnegative_integer(row_count)
+    anomalies = as_nonnegative_integer(anomaly_count)
+    normal = as_nonnegative_integer(normal_count)
+
+    try:
+        percentage = float(anomaly_percentage)
+        percentage_valid = np.isfinite(percentage) and 0 <= percentage <= 100
+    except (TypeError, ValueError, OverflowError):
+        percentage = None
+        percentage_valid = False
+
+    normalized_method = re.sub(r"[\s_-]+", "", str(method or "").lower())
+    record(
+        "isolation_forest_method",
+        normalized_method == "isolationforest",
+        "Evidence does not identify Isolation Forest as the detection method.",
+    )
+    record(
+        "result_status",
+        str(status or "").upper() == "PASS",
+        "The Isolation Forest execution result is not marked PASS.",
+    )
+    record(
+        "valid_row_count",
+        rows is not None and rows > 0,
+        "The total row count is missing or invalid.",
+    )
+    record(
+        "valid_anomaly_count",
+        anomalies is not None,
+        "The anomaly count is missing or invalid.",
+    )
+    record(
+        "valid_normal_count",
+        normal is not None,
+        "The normal-record count is missing or invalid.",
+    )
+    record(
+        "feature_columns",
+        isinstance(features, (list, tuple)) and len(features) > 0,
+        "The Isolation Forest feature-column list is missing or empty.",
+    )
+    record(
+        "valid_anomaly_percentage",
+        percentage_valid,
+        "The anomaly percentage is missing or outside the 0–100 range.",
+    )
+
+    counts_reconcile = (
+        rows is not None
+        and anomalies is not None
+        and normal is not None
+        and rows == anomalies + normal
+    )
+    record(
+        "row_count_reconciliation",
+        counts_reconcile,
+        "Total rows must equal anomaly_count plus normal_count.",
+    )
+
+    percentage_reconciles = (
+        counts_reconcile
+        and percentage_valid
+        and rows > 0
+        and abs(percentage - (anomalies / rows * 100)) <= 0.02
+    )
+    record(
+        "anomaly_percentage_reconciliation",
+        percentage_reconciles,
+        "The reported anomaly percentage does not match anomaly_count / row_count.",
+    )
+
+    # Cross-check duplicated summary fields when they are present.
+    summary_checks = (
+        ("row_count", rows),
+        ("anomaly_count", anomalies),
+        ("normal_count", normal),
+    )
+    for field, expected in summary_checks:
+        if field in summary:
+            actual = as_nonnegative_integer(summary.get(field))
+            record(
+                f"summary_{field}",
+                expected is not None and actual == expected,
+                f"The summary {field} does not match the validated result.",
+            )
+    if "anomaly_percentage" in summary:
+        try:
+            summary_percentage = float(summary["anomaly_percentage"])
+            summary_percentage_ok = (
+                percentage_valid
+                and np.isfinite(summary_percentage)
+                and abs(summary_percentage - percentage) <= 0.02
+            )
+        except (TypeError, ValueError, OverflowError):
+            summary_percentage_ok = False
+        record(
+            "summary_anomaly_percentage",
+            summary_percentage_ok,
+            "The summary anomaly percentage does not match the validated result.",
+        )
+
+    text = str(insight or "")
+    lower = text.lower()
+
+    # Do not allow an anomaly label to be presented as proof of fraud or error.
+    unsupported_interpretation = bool(
+        re.search(
+            r"\b(?:anomal(?:y|ies)|outliers?)\b"
+            r".{0,50}\b(?:prove|proves|proving|confirm|confirms|confirming|"
+            r"indicate|indicates|indicating|demonstrate|demonstrates|demonstrating)\b"
+            r".{0,30}\b(?:fraud|fraudulent|data errors?|incorrect records?)\b",
+            lower,
+        )
+        or re.search(
+            r"\b(?:anomal(?:y|ies)|outliers?)\b"
+            r".{0,20}\bare\s+(?:fraudulent|data errors?|incorrect records?)\b",
+            lower,
+        )
+    )
+    record(
+        "no_unsupported_fraud_or_error_conclusion",
+        not unsupported_interpretation,
+        "Anomaly detection does not establish fraud or prove that records are erroneous.",
+    )
+
+    def numeric_tokens(pattern):
+        return [
+            float(match.replace(",", ""))
+            for match in re.findall(pattern, text, flags=re.IGNORECASE)
+        ]
+
+    anomaly_claims = numeric_tokens(
+        r"(?<![\w.])([\d,]+)\s+(?:anomal(?:y|ies)|outliers?)\b"
+    )
+    if anomaly_claims:
+        anomaly_claim_ok = (
+            anomalies is not None
+            and all(value == anomalies for value in anomaly_claims)
+        )
+        record(
+            "reported_anomaly_count",
+            anomaly_claim_ok,
+            "The anomaly/outlier count stated in the insight does not match the evidence.",
+        )
+
+    normal_claims = numeric_tokens(
+        r"(?<![\w.])([\d,]+)\s+(?:records?|rows?|observations?)"
+        r"\s+(?:were\s+)?(?:classified|identified|labelled|labeled)\s+as\s+normal\b"
+    )
+    if normal_claims:
+        normal_claim_ok = (
+            normal is not None
+            and all(value == normal for value in normal_claims)
+        )
+        record(
+            "reported_normal_count",
+            normal_claim_ok,
+            "The normal-record count stated in the insight does not match the evidence.",
+        )
+
+    row_claims = numeric_tokens(
+        r"\b(?:among|out\s+of|across|evaluated|analysed|analyzed)"
+        r"\s+([\d,]+)\s+(?:records?|rows?|observations?)\b"
+    )
+    if row_claims:
+        row_claim_ok = (
+            rows is not None
+            and all(value == rows for value in row_claims)
+        )
+        record(
+            "reported_row_count",
+            row_claim_ok,
+            "The total-record count stated in the insight does not match the evidence.",
+        )
+
+    percentage_claims = numeric_tokens(
+        r"(?<![\w.])([\d,]+(?:\.\d+)?)\s*%"
+    )
+    anomaly_percentage_claims = []
+    for match in re.finditer(r"(?<![\w.])([\d,]+(?:\.\d+)?)\s*%", text):
+        start = max(0, match.start() - 55)
+        end = min(len(lower), match.end() + 55)
+        nearby = lower[start:end]
+        if re.search(r"\b(anomal(?:y|ies)|outliers?)\b", nearby):
+            anomaly_percentage_claims.append(
+                float(match.group(1).replace(",", ""))
+            )
+    if anomaly_percentage_claims:
+        percentage_claim_ok = (
+            percentage_valid
+            and all(
+                abs(value - percentage) <= 0.02
+                for value in anomaly_percentage_claims
+            )
+        )
+        record(
+            "reported_anomaly_percentage",
+            percentage_claim_ok,
+            "The anomaly percentage stated in the insight does not match the evidence.",
+        )
+
+    has_anomaly_topic = bool(re.search(r"\b(anomal(?:y|ies)|outliers?)\b", lower))
+    has_numeric_anomaly_claim = bool(anomaly_claims or anomaly_percentage_claims)
+    record(
+        "insight_contains_verifiable_anomaly_claim",
+        has_anomaly_topic and has_numeric_anomaly_claim,
+        "The insight must mention anomalies/outliers and state a verifiable anomaly count or percentage.",
+    )
+
+    failures = [item for item in checks if item["status"] != "PASS"]
+    return {
+        "status": "PASS" if checks and not failures else "FAIL",
+        "reason": (
+            None
+            if not failures
+            else "One or more Isolation Forest evidence or insight claims failed verification."
+        ),
+        "checks": checks,
+        "verified_claims": len(checks) - len(failures),
+        "failed_claims": len(failures),
+        "validated_result": result,
+    }
+
+
+
+# ============================================================
 # MAP INSIGHT TO EVIDENCE
 # ============================================================
 
@@ -1150,6 +1479,56 @@ def map_insight_to_evidence(
     analysis_type = evidence.get(
         "analysis_type"
     )
+
+    # --------------------------------------------------------
+    # METHOD-SPECIFIC OUTLIER EVIDENCE
+    # --------------------------------------------------------
+    if analysis_type in ("anomaly_detection", "outlier_analysis"):
+        method = re.sub(r"[\s_-]+", "", str(evidence.get("method", "")).lower())
+        result_payload = evidence.get("result", evidence.get("supporting_result", {}))
+        if method in {"iqr", "interquartilerange"}:
+            from src.insight_validator import validate_anomaly_claims
+            if isinstance(result_payload, dict) and isinstance(result_payload.get("result"), dict):
+                result_payload = result_payload["result"]
+            # Normalize the generated IQR evidence keys to the legacy claim validator schema.
+            normalized = dict(result_payload) if isinstance(result_payload, dict) else {}
+            normalized.setdefault("outlier_count", evidence.get("outlier_count"))
+            normalized.setdefault("lower_bound", evidence.get("lower_bound"))
+            normalized.setdefault("upper_bound", evidence.get("upper_bound"))
+            normalized.setdefault("column", evidence.get("metric_column"))
+            validation = validate_anomaly_claims(insight, normalized)
+            passed = validation.get("pass") is True
+            return {
+                "status": "PASS" if passed else "FAIL",
+                "analysis_type": "outlier_analysis",
+                "method": "IQR",
+                "insight": insight,
+                "evidence_summary": create_evidence_summary(evidence),
+                "supporting_result": safe_json_value(normalized) if "safe_json_value" in globals() else normalized,
+                "claim_validation": validation,
+                **({} if passed else {"reason": validation.get("reason", "IQR insight claims failed validation.")}),
+            }
+        if method != "isolationforest":
+            return {"status": "FAIL", "analysis_type": analysis_type, "insight": insight,
+                    "reason": "Outlier evidence must explicitly identify IQR or Isolation Forest."}
+        validation = _validate_isolation_forest_insight(insight, evidence)
+        validated_result = validation.get("validated_result")
+        result = {
+            "status": validation.get("status", "FAIL"),
+            "analysis_type": "anomaly_detection",
+            "insight": insight,
+            "evidence_summary": create_evidence_summary(evidence),
+            "supporting_result": validated_result,
+            "claim_validation": {
+                "status": validation.get("status", "FAIL"),
+                "checks": validation.get("checks", []),
+                "verified_claims": validation.get("verified_claims", 0),
+                "failed_claims": validation.get("failed_claims", 1),
+            },
+        }
+        if validation.get("reason"):
+            result["reason"] = validation["reason"]
+        return result
     # --------------------------------------------------------
     # FILTERED MEAN EVIDENCE
     # --------------------------------------------------------
@@ -1219,6 +1598,65 @@ def map_insight_to_evidence(
             "reason": None if not failed else "Filtered mean insight did not match its evidence.",
         }
 
+
+    # --------------------------------------------------------
+    # SCALAR MAXIMUM / MINIMUM EVIDENCE
+    # --------------------------------------------------------
+    if analysis_type == "extrema_analysis":
+        def find_extrema_result(obj, depth=0):
+            if depth > 6 or not isinstance(obj, dict):
+                return None
+            if (obj.get("analysis_type") == "extrema_analysis"
+                    and obj.get("value") is not None
+                    and obj.get("operation") in {"maximum", "minimum"}):
+                return obj
+            for key in ("primary_result", "result", "supporting_result", "evidence", "validated_result"):
+                found = find_extrema_result(obj.get(key), depth + 1)
+                if found is not None:
+                    return found
+            return None
+
+        extrema_result = find_extrema_result(evidence)
+        if extrema_result is None:
+            return {
+                "status": "FAIL", "analysis_type": "extrema_analysis",
+                "insight": insight,
+                "reason": "No validated maximum/minimum result was found in the evidence.",
+                "checks": [{"check": "validated_extreme_available", "status": "FAIL"}],
+            }
+        operation = extrema_result.get("operation")
+        metric = extrema_result.get("metric_column")
+        expected_value = _parse_claim_number(extrema_result.get("value"))
+        text = str(insight or "")
+        normalized_text = " ".join(text.lower().replace("_", " ").split())
+        metric_text = " ".join(str(metric or "").lower().replace("_", " ").split())
+        metric_pattern = r"(?<![\w])" + re.escape(metric_text) + r"(?![\w])" if metric_text else None
+        metric_ok = bool(metric_pattern and re.search(metric_pattern, normalized_text))
+        operation_pattern = (r"\b(maximum|max|highest|largest|greatest)\b"
+                             if operation == "maximum"
+                             else r"\b(minimum|min|lowest|smallest|least)\b")
+        operation_ok = bool(re.search(operation_pattern, normalized_text))
+        numeric_tokens = re.findall(r"(?<![\w.])[-+]?\d[\d,]*(?:\.\d+)?", text)
+        claimed_values = [_parse_claim_number(token) for token in numeric_tokens]
+        value_ok = expected_value is not None and any(
+            value is not None and round(value, 2) == round(expected_value, 2)
+            for value in claimed_values
+        )
+        checks = [
+            {"check": "metric_column_mentioned", "status": "PASS" if metric_ok else "FAIL"},
+            {"check": "requested_extreme_operation_mentioned", "status": "PASS" if operation_ok else "FAIL"},
+            {"check": "reported_extreme_matches_validated_result", "status": "PASS" if value_ok else "FAIL"},
+        ]
+        failed = [item for item in checks if item["status"] != "PASS"]
+        return {
+            "status": "PASS" if not failed else "FAIL",
+            "analysis_type": "extrema_analysis", "insight": insight,
+            "operation": operation, "metric_column": metric,
+            "validated_value": expected_value,
+            "valid_value_count": extrema_result.get("valid_value_count"),
+            "supporting_result": extrema_result, "checks": checks,
+            "reason": None if not failed else "The maximum/minimum insight does not match the validated evidence.",
+        }
 
     # --------------------------------------------------------
     # MEAN ANALYSIS

@@ -1,3 +1,4 @@
+
 import sys
 from pathlib import Path
 
@@ -57,7 +58,11 @@ def test_incorrect_subscriber_lower_claim_fails():
 def test_correct_subscriber_higher_claim_passes():
     result = grouped_balance_result()
     validation = validate_grouped_mean_direction_claims(
-        insight="Subscribers have a higher average balance than non-subscribers.",
+        insight=(
+            "For balance, the yes (subscribers) group has an average of "
+            "1804.267915, while the no (non-subscribers) group has an "
+            "average of 1303.714969."
+        ),
         result=result,
         user_question="Compare average balance for subscribers and non-subscribers.",
     )
