@@ -22,6 +22,7 @@ from answer_support import (
     special_evidence,
     special_mapping,
     special_recommendation,
+    set_answer_focus,
     build_iqr_evidence_mapping,
     build_isolation_forest_mapping,
 )
@@ -2811,6 +2812,10 @@ def build_clarification_request(task_analysis, data_profile):
     focus_metric = (mentioned or numeric or [None])[0]
     other_numeric = [c for c in numeric if c != focus_metric]
     examples = []
+    named_categorical = [c for c in ((spec or {}).get("mentioned_columns") or []) if c in categorical] if isinstance(spec, dict) else []
+    if named_categorical:
+        examples.append(f"How many customers are there in each {named_categorical[0]} category?")
+        examples.append(f"What is the distribution of customers by {named_categorical[0]}?")
     if focus_metric and base_categorical:
         examples.append(f"What is the average {focus_metric} by {base_categorical[0]}?")
         examples.append(f"Which {base_categorical[0]} has the highest average {focus_metric}?")
@@ -2875,7 +2880,7 @@ def _trace_status(value):
     return "PASS" if value is True else "FAIL" if value is False else "REVIEW"
 
 
-def build_dataset_overview(data_profile, data_path):
+def build_dataset_overview(data_profile, data_path, display_name=None):
     """Dataset facts for the report header (stages: upload, loading, profiling)."""
     profile = data_profile if isinstance(data_profile, dict) else {}
     columns = profile.get("columns", {}) if isinstance(profile.get("columns"), dict) else {}
@@ -2890,7 +2895,7 @@ def build_dataset_overview(data_profile, data_path):
         except (TypeError, ValueError):
             pass
     return {
-        "file": os.path.basename(str(data_path)),
+        "file": display_name or os.path.basename(str(data_path)),
         "rows": profile.get("n_rows"),
         "columns": profile.get("n_columns", len(columns)),
         "missing_cells": missing,
@@ -2903,12 +2908,13 @@ def build_pipeline_trace(
     data_profile, data_path, user_question, task_analysis, execution_results,
     aggregated_result, primary_result, analysis_type, insight_validation,
     mapped_evidence, recommendation_validation, ollama_rewrite_status,
+    display_name=None,
 ):
     """
     One entry per workflow stage with what happened in THIS run, replacing the
     static diagram that looked identical for every question.
     """
-    overview = build_dataset_overview(data_profile, data_path)
+    overview = build_dataset_overview(data_profile, data_path, display_name)
     spec = task_analysis.get("analytical_spec", {}) if isinstance(task_analysis, dict) else {}
     steps = execution_results.get("steps", []) if isinstance(execution_results, dict) else []
     reliability = (aggregated_result or {}).get("reliability", {}) if isinstance(aggregated_result, dict) else {}
@@ -3451,6 +3457,11 @@ def generate_pipeline_recommendation(
             "indicate more unusual observations. Check whether each flag reflects a "
             "data-quality issue, a legitimate rare event, or a pattern requiring further "
             "investigation; do not automatically delete or relabel flagged records."
+            + (
+                " With a single feature, extreme values often receive identical scores, "
+                "so rank the flagged records by the feature value itself."
+                if len(primary_result.get("feature_columns") or []) == 1 else ""
+            )
             + sample_note
         )
 
@@ -3615,7 +3626,14 @@ def generate_pipeline_recommendation(
             for label, details in groups.items()
             if isinstance(details, dict) and isinstance(details.get("count"), int)
         }
-        if len(counts) == len(groups) and counts:
+        if len(counts) == len(groups) and counts and len(groups) <= 2:
+            # Two groups: the range sentence and the small-group caution add nothing.
+            size_text = (
+                f" The highest-average group has {counts[highest[0]]:,} records and the "
+                f"lowest-average group has {counts[lowest[0]]:,} records."
+            )
+            follow_up = " Investigate whether the differences are meaningful before making decisions."
+        elif len(counts) == len(groups) and counts:
             size_text = (
                 f" The highest-average group has {counts[highest[0]]:,} records and the "
                 f"lowest-average group has {counts[lowest[0]]:,} records; group sizes range "
@@ -3799,7 +3817,7 @@ def generate_pipeline_recommendation(
 # MAIN
 # =========================================================
 
-def main(dataset_path=None, user_question=None, test_fault=False):
+def main(dataset_path=None, user_question=None, test_fault=False, dataset_name=None):
 
     # Use the dataset supplied by Streamlit when present; retain the default
     # sales dataset for standalone command-line runs.
@@ -3928,6 +3946,10 @@ def main(dataset_path=None, user_question=None, test_fault=False):
         print_section("FINAL PIPELINE STATUS")
         print("OVERALL RESULT: NEEDS CLARIFICATION")
         return None
+
+    # The question's answer focus (top N, ranking, rate ...) selects the validated
+    # answer path for grouped results.
+    set_answer_focus(task_analysis)
 
     # =====================================================
     # STEP 3 - EDA PLAN
@@ -4718,10 +4740,16 @@ def main(dataset_path=None, user_question=None, test_fault=False):
                     "(validation failed); original insight retained."
                 )
         else:
-            ollama_rewrite_status = "SKIPPED (no rewrite produced; original insight kept)"
+            try:
+                import ollama_insight_rewriter as _rewriter_module
+                _why = dict(_rewriter_module.last_status)
+            except Exception:  # status is diagnostic only
+                _why = {"state": "SKIPPED", "detail": "no rewrite produced"}
+            _detail = _why.get("detail") or "no rewrite produced"
+            ollama_rewrite_status = f"SKIPPED ({_detail}; original insight kept)"
             print(
-                "Ollama insight rewrite: SKIPPED; "
-                "original insight retained."
+                "Ollama insight rewrite: SKIPPED - "
+                f"{_detail}; original insight retained."
             )
 
     except Exception as exc:
@@ -4908,11 +4936,12 @@ def main(dataset_path=None, user_question=None, test_fault=False):
 
     try:
         report_extras = {
-            "dataset_overview": build_dataset_overview(data_profile, DATA_PATH),
+            "dataset_overview": build_dataset_overview(data_profile, DATA_PATH, dataset_name),
             "pipeline_trace": build_pipeline_trace(
                 data_profile, DATA_PATH, user_question, task_analysis, execution_results,
                 aggregated_result, primary_result, analysis_type, insight_validation,
                 mapped_evidence, recommendation_validation, ollama_rewrite_status,
+                dataset_name,
             ),
         }
     except Exception as exc:  # the trace must never prevent the report

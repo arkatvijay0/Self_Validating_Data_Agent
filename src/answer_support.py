@@ -8,12 +8,23 @@ import aggregate_support as _agg
 
 SPECIAL_TYPES = {_count.ANALYSIS_TYPE, _agg.ANALYSIS_TYPE}
 
+# The question's answer focus (e.g. "top 5", "rank", "conversion rate") decides which
+# validated path takes over a grouped result. main() sets it once per run, right
+# after task analysis; without it only the default routing applies.
+_STATE = {"focus": None}
+
+
+def set_answer_focus(task_analysis):
+    spec = task_analysis.get("analytical_spec") if isinstance(task_analysis, dict) else None
+    focus = spec.get("answer_focus") if isinstance(spec, dict) else None
+    _STATE["focus"] = focus if isinstance(focus, dict) else None
+
 
 def extract_special_result(primary_result):
     normalized = _count.extract_specification_grouped_count(primary_result)
     if normalized is not None:
         return {"analysis_type": _count.ANALYSIS_TYPE, "data": normalized}
-    normalized = _agg.extract_specification_aggregate(primary_result)
+    normalized = _agg.extract_specification_aggregate(primary_result, _STATE["focus"])
     if normalized is not None:
         return {"analysis_type": _agg.ANALYSIS_TYPE, "data": normalized}
     return None

@@ -49,4 +49,3 @@ Compare average balance between customers with and without housing loans.
 Which month has the highest average campaign duration?
 Summarize the customer conversion distribution.
 Identify the top three job categories by customer count.
-Generate actionable recommendations based on customer balance and patterns.

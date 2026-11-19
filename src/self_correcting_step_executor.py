@@ -594,10 +594,11 @@ def execute_self_correcting_step(
             # Use numeric features, excluding columns explicitly profiled as identifiers.
             feature_columns = select_anomaly_features(analysis_df, analytical_spec, data_profile)
 
+            contamination_setting = (analytical_spec or {}).get("contamination") or 0.05
             detector_output = detect_anomalies(
                 analysis_df,
                 feature_columns=feature_columns,
-                contamination=0.05,
+                contamination=float(contamination_setting),
                 random_state=42,
                 n_estimators=200,
             )
@@ -686,7 +687,7 @@ def execute_self_correcting_step(
                 "operations": ["outlier_detection"],
                 "filters_applied": filters,
                 "feature_columns": list(summary.get("feature_columns") or []),
-                "contamination": 0.05,
+                "contamination": float(contamination_setting),
                 "anomaly_count": anomaly_count,
                 "anomaly_percentage": anomaly_percentage,
                 "normal_count": int(len(analysis_df) - anomaly_count),

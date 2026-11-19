@@ -130,6 +130,38 @@ def _numbers_match(
     return False
 
 
+
+def _label_tokens(evidence, labels=None, depth=0):
+    """
+    Group labels found in the evidence that mix digits with other characters
+    ("26-35", "65+", "<=25", "3 Contacts"). Their digits name a category; they
+    are not numeric claims. Pure-number labels are left alone.
+    """
+    labels = set() if labels is None else labels
+    if depth > 10:
+        return labels
+    if isinstance(evidence, dict):
+        for key, value in evidence.items():
+            if key == "group_results" and isinstance(value, dict):
+                labels.update(str(k) for k in value.keys())
+            elif key == "group_values" and isinstance(value, dict):
+                labels.update(str(v) for v in value.values())
+            else:
+                _label_tokens(value, labels, depth + 1)
+    elif isinstance(evidence, (list, tuple)):
+        for item in evidence:
+            _label_tokens(item, labels, depth + 1)
+    return {l for l in labels if re.search(r"\d", l) and re.search(r"[^\d\s.,]", l)}
+
+
+def _mask_labels(text, evidence):
+    """Blank out category labels so their digits are not extracted as claims."""
+    masked = str(text or "")
+    for label in sorted(_label_tokens(evidence), key=len, reverse=True):
+        masked = masked.replace(label, " ")
+    return masked
+
+
 def validate_text_against_evidence(
     text: Any,
     evidence: Any,
@@ -148,7 +180,7 @@ def validate_text_against_evidence(
     REVIEW is deliberately non-failing: derived values, rounded formatting,
     percentages, and semantic claims may need domain-specific validation.
     """
-    claims = extract_numeric_claims(text)
+    claims = extract_numeric_claims(_mask_labels(text, evidence))
     evidence_numbers = _collect_evidence_numbers(evidence)
 
     matched = []

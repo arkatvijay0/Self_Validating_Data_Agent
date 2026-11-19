@@ -1,0 +1,255 @@
+============================================================
+SELF-VALIDATING EDA AGENT
+FINAL ANALYSIS REPORT
+============================================================
+
+Generated On:
+2026-11-19 20:35:03
+
+DATASET OVERVIEW
+------------------------------------------------------------
+File: SV_EDA_450_Benchmark_Detailed.csv
+Rows: 450
+Columns: 14
+Missing cells: 1,144
+Column types: categorical 5, continuous 2, identifier 2, text_or_id 5
+Identifier columns: id, validator_predicted_valid
+
+
+1. USER QUESTION
+------------------------------------------------------------
+what are the missing values?
+
+2. ANALYSIS TYPE
+------------------------------------------------------------
+specification_aggregate_analysis
+
+3. VALIDATED EDA RESULT
+------------------------------------------------------------
+status: PASS
+analysis_type: specification_driven
+operations: [
+  "missing_values"
+]
+metrics: []
+group_by: []
+filters_applied: []
+input_rows: 450
+analyzed_rows: 450
+operation_results: {
+  "missing_values": {
+    "total_missing_cells": 1144,
+    "by_column": {
+      "id": 0,
+      "difficulty": 0,
+      "question": 0,
+      "pipeline_status": 0,
+      "independent_numeric_check": 0,
+      "ground_truth_correct": 0,
+      "validator_predicted_valid": 0,
+      "execution_time_sec": 0,
+      "error": 445,
+      "expected_numeric_values": 0,
+      "actual_result_numeric_values": 0,
+      "group_mapping_check": 200,
+      "expected_group_mapping": 265,
+      "actual_operation_results": 234
+    }
+  }
+}
+
+4. GENERATED INSIGHT
+------------------------------------------------------------
+There are 1,144 missing cells across 450 rows; 4 of 14 columns have missing values: error: 445; expected_group_mapping: 265; actual_operation_results: 234; group_mapping_check: 200.
+
+5. INSIGHT VALIDATION
+------------------------------------------------------------
+Overall Validation: PASS
+Presence Check: PASS
+Result Check: PASS
+
+The insight validation stage checks whether the generated natural-language statement is supported by the validated numerical result.
+
+6. SUPPORTING EVIDENCE
+------------------------------------------------------------
+Evidence Status: PASS
+
+{
+  "missing_cells": 1144,
+  "column_count": 14,
+  "by_column": {
+    "id": 0,
+    "difficulty": 0,
+    "question": 0,
+    "pipeline_status": 0,
+    "independent_numeric_check": 0,
+    "ground_truth_correct": 0,
+    "validator_predicted_valid": 0,
+    "execution_time_sec": 0,
+    "error": 445,
+    "expected_numeric_values": 0,
+    "actual_result_numeric_values": 0,
+    "group_mapping_check": 200,
+    "expected_group_mapping": 265,
+    "actual_operation_results": 234
+  },
+  "total_rows": 450
+}
+
+INSIGHT-TO-EVIDENCE TRACEABILITY
+------------------------------------------------------------
+Insight mapping status: PASS
+Traceability status: PASS
+Mapped analysis type: specification_aggregate_analysis
+Evidence source references:
+- primary_result [validated_analysis_result]
+  Linked result:
+    {
+      "missing_cells": 1144,
+      "column_count": 14,
+      "by_column": {
+        "id": 0,
+        "difficulty": 0,
+        "question": 0,
+        "pipeline_status": 0,
+        "independent_numeric_check": 0,
+        "ground_truth_correct": 0,
+        "validator_predicted_valid": 0,
+        "execution_time_sec": 0,
+        "error": 445,
+        "expected_numeric_values": 0,
+        "actual_result_numeric_values": 0,
+        "group_mapping_check": 200,
+        "expected_group_mapping": 265,
+        "actual_operation_results": 234
+      },
+      "total_rows": 450
+    }
+Claim validation details:
+{
+  "status": "PASS",
+  "total_claims": 2,
+  "passed_claims": 2,
+  "failed_claims": 0,
+  "checks": [
+    {
+      "check": "result_status",
+      "status": "PASS"
+    },
+    {
+      "check": "missing_value_counts_match_validated_result",
+      "status": "PASS"
+    }
+  ]
+}
+
+7. RECOMMENDATION
+------------------------------------------------------------
+Recommendation Status: PASS
+Independent Recommendation Validation: PASS
+{
+  "status": "PASS",
+  "overall": "PASS",
+  "pass": true,
+  "analysis_type": "specification_aggregate_analysis",
+  "total_numeric_claims": 1,
+  "verified_numeric_claims": 1,
+  "unverified_numeric_claims": 0,
+  "checks": [
+    {
+      "name": "numeric_claim_grounding",
+      "status": "PASS",
+      "total": 1,
+      "verified": 1,
+      "unverified": 0,
+      "verified_claims": [
+        {
+          "text": "1,144",
+          "value": 1144.0,
+          "matched_evidence_path": "evidence.source_result.operation_results.missing_values.total_missing_cells"
+        }
+      ],
+      "unverified_claims": []
+    },
+    {
+      "name": "structured_basis_consistency",
+      "status": "NOT_APPLICABLE",
+      "mismatches": [],
+      "reason": "No structured recommendation basis was supplied and none could be derived from a validated primary result; numeric grounding applies.",
+      "basis_source": null,
+      "basis_checks": []
+    },
+    {
+      "name": "existing_claim_evidence_validation",
+      "status": "PASS"
+    }
+  ],
+  "reasons": []
+}
+
+Decide how to treat the 1,144 missing cells before modelling: impute, exclude, or model them explicitly, and check whether the gaps are concentrated in particular columns or groups.
+
+8. OVERALL RELIABILITY
+------------------------------------------------------------
+PASS
+
+Overall reliability is marked PASS when the generated insight, evidence, recommendation, applicable claim-level checks, and insight mapping pass. The user's original directional claim is reported separately and does not by itself invalidate an otherwise correct analysis. Traceability PASS indicates that explicit source references are available for the mapped evidence.
+
+9. VALIDATION AND SELF-CORRECTION PIPELINE
+------------------------------------------------------------
+ 1. Dataset Upload
+      Status : PASS
+      Detail : SV_EDA_450_Benchmark_Detailed.csv (450 rows x 14 columns)
+ 2. Data Loading and Preprocessing
+      Status : PASS
+      Detail : loaded without row removal; missing cells: 1,144
+ 3. Data Profiling
+      Status : PASS
+      Detail : column types: categorical 5, continuous 2, identifier 2, text_or_id 5
+ 4. Natural Language Query
+      Status : RECEIVED
+      Detail : what are the missing values?
+ 5. Task Analysis and EDA Planning
+      Status : READY
+      Detail : task=descriptive_summary; operations=[missing_values]; metrics=[none]; group_by=[none]; filters=0; plan steps=2
+ 6. Python Code Generation and Execution
+      Status : PASS
+      Detail : 2 of 2 step(s) succeeded
+ 7. Result Aggregation
+      Status : PASS
+      Detail : analysis type: specification_aggregate_analysis
+ 8. Independent Validation
+      Status : PASS
+      Detail : results recomputed independently from the source data and compared
+ 9. Self-Correction and Re-execution
+      Status : NOT NEEDED
+      Detail : every step passed on its first attempt (2 attempt(s) for 2 step(s))
+10. Insight Generation and Validation
+      Status : PASS
+11. Evidence Mapping
+      Status : PASS
+      Detail : traceability PASS
+12. Ollama-Based Insight Rewriting (optional)
+      Status : SKIPPED
+      Detail : rewriting is switched off; set EDA_ENABLE_OLLAMA_INSIGHT_REWRITE=1 to enable it; original insight kept
+13. Isolation Forest Anomaly Detection
+      Status : NOT REQUESTED
+      Detail : the question did not ask for Isolation Forest
+14. Recommendation Generation and Validation
+      Status : PASS
+15. Final EDA Report
+      Status : GENERATED
+
+10. VALIDATION STATUS SUMMARY
+------------------------------------------------------------
+Insight Validation: PASS
+Evidence Validation: PASS
+Recommendation Validation: PASS
+Claim-Level Validation: PASS
+Insight Mapping: PASS
+Traceability: PASS
+Overall Reliability: PASS
+
+============================================================
+END OF REPORT
+============================================================

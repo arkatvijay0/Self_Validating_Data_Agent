@@ -106,6 +106,50 @@ CLARIFY = [
     "Generate actionable recommendations based on customer balance and conversion patterns.",
 ]
 
+pct = lambda v: f"{v:.2f}%"          # noqa: E731
+
+
+def dist_pairs(text, column):
+    counts = df[column].value_counts()
+    total = len(df)
+    return all(re.search(re.escape(f"{k}: {v:,} ({v / total * 100:.2f}%)"), text) for k, v in counts.items())
+
+
+def order_ok(text, labels_in_order, fmt_value):
+    positions = [text.find(f"{k}: {fmt_value(v)}") for k, v in labels_in_order]
+    return all(p >= 0 for p in positions) and positions == sorted(positions)
+
+
+conv_by = lambda col: df.groupby(col).conversion.mean() * 100      # noqa: E731
+corr_age_balance = df.age.corr(df.balance)
+top5 = df.groupby("job").balance.mean().sort_values(ascending=False)
+edu_rank = df.groupby("education").balance.mean().sort_values(ascending=False)
+
+CHECKS += [
+    ("Calculate the distribution of customers across education categories.", lambda t: dist_pairs(t, "education")),
+    ("Show the breakdown of customers by marital status.", lambda t: dist_pairs(t, "marital")),
+    ("What percentage of customers have a housing loan?", lambda t: dist_pairs(t, "housing")),
+    ("Show the distribution of age.", lambda t: all(x in t for x in (
+        f"average {f2(df.age.mean())}", f"median {f2(df.age.median())}", f"standard deviation {f2(df.age.std())}",
+        f"minimum {f2(df.age.min())}", f"maximum {f2(df.age.max())}"))),
+    ("How many customers subscribed?", lambda t: fi(df.conversion.sum()) in t),
+    ("What is the overall conversion rate?", lambda t: pct(df.conversion.mean() * 100) in t),
+    ("What is the conversion rate by education?", lambda t: all(f"{k}: {pct(v)}" in t for k, v in conv_by("education").items())),
+    ("Which month has the highest conversion rate?", lambda t: (lambda r: f"{r.idxmax()} ({pct(r.max())})" in t)(conv_by("month"))),
+    ("Which contact type has the longest average call duration?", lambda t: has_winner(t, grp("contact", "duration", "mean"), True)),
+    ("List the top 5 jobs by average balance.", lambda t: order_ok(t, list(top5.head(5).items()), f2)
+        and f"{top5.index[5]}: " not in t.split("These are")[0]),
+    ("Rank the education levels by average balance.", lambda t: order_ok(t, list(edu_rank.items()), f2)),
+    ("Show the average balance by age group.", lambda t: has_pairs(t, grp("age_group", "balance", "mean"))),
+    ("How many missing values are there?", lambda t: (f"{int(df.isna().sum().sum()):,} missing cells" in t) if df.isna().sum().sum()
+        else ("no missing values" in t and f"all {df.shape[1]} columns" in t)),
+    ("Are there duplicate rows?", lambda t: (f"{int(df.duplicated().sum()):,} duplicate rows" in t) if df.duplicated().sum()
+        else (f"no duplicate rows among the {len(df):,} rows" in t)),
+    ("Determine whether age and balance have a strong positive relationship.", lambda t: f"{corr_age_balance:.3f}" in t
+        and (("Answer: no" in t) == (abs(corr_age_balance) < 0.5 or corr_age_balance <= 0))),
+]
+CLARIFY.append("What is the 90th percentile of balance?")
+
 if __name__ == "__main__":
     passed = 0
     for question, check in CHECKS:

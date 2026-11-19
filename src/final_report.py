@@ -7,10 +7,36 @@ from datetime import datetime
 # HELPER FUNCTION
 # ==========================================================
 
+def _compact_samples(value, features=None, depth=0):
+    """
+    Display only: Isolation Forest sample rows carry every dataset column and were
+    printed several times (result, evidence, traceability). Reduce each sample row
+    to the analysed features and the score wherever they appear.
+    """
+    if depth > 8:
+        return value
+    if isinstance(value, dict):
+        own = value.get("feature_columns")
+        features = [str(f) for f in own] if isinstance(own, list) and own else features
+        out = {}
+        for key, item in value.items():
+            if key == "sample_anomalies" and isinstance(item, list) and item and all(isinstance(r, dict) for r in item):
+                keep = list(features or []) + ["anomaly_score"]
+                out[key] = [{k: r[k] for k in keep if k in r} or r for r in item]
+            else:
+                out[key] = _compact_samples(item, features, depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_compact_samples(item, features, depth + 1) for item in value]
+    return value
+
+
 def format_value(value):
     """
     Format values for readable report output.
     """
+
+    value = _compact_samples(value)
 
     if isinstance(value, float):
 
@@ -150,6 +176,15 @@ def compact_result_for_display(result, max_rows=12):
     section 3 then keeps only the first rows. Display only: the validated result
     itself is untouched.
     """
+    if isinstance(result, dict) and isinstance(result.get("sample_anomalies"), list):
+        # Isolation Forest: each sample row carries every dataset column. Keep the
+        # analysed features and the score; the full rows stay in the result.
+        keep = [str(f) for f in (result.get("feature_columns") or [])] + ["anomaly_score"]
+        rows = [{k: row[k] for k in keep if k in row} for row in result["sample_anomalies"] if isinstance(row, dict)]
+        shown = dict(result)
+        shown["sample_anomalies"] = rows
+        shown["sample_note"] = "Only the analysed features and the anomaly score are shown; full rows are in the execution output."
+        return shown
     if not isinstance(result, dict) or not render_result_table(result):
         return result
     operation_results = result.get("operation_results")
@@ -459,6 +494,15 @@ def create_final_report(
                 )
             )
 
+        elif str(insight_validation.get("analysis_type", "")) in {
+            "grouped_count_analysis", "specification_aggregate_analysis"
+        }:
+            # Dedicated count / aggregate validators report plain boolean checks.
+            flags = {k: v for k, v in checks.items() if isinstance(v, bool)}
+            presence_keys = [k for k in flags if "mentioned" in k]
+            presence_pass = bool(flags) and all(flags[k] for k in presence_keys)
+            result_pass = bool(flags) and all(v for k, v in flags.items() if k not in presence_keys)
+
         else:
             presence = checks.get("presence", {})
             result_check = checks.get("result", {})
@@ -643,8 +687,17 @@ def create_final_report(
                 "Evidence Summary:"
             )
 
+            summary_text = str(evidence_summary)
+            try:
+                import json as _json
+                summary_text = _json.dumps(
+                    _compact_samples(_json.loads(summary_text)), indent=2, default=str
+                )
+            except (ValueError, TypeError):
+                pass
+
             report_lines.append(
-                str(evidence_summary)
+                summary_text
             )
 
     else:

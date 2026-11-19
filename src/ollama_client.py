@@ -16,14 +16,23 @@ import ollama
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "llama3.2:1b"
-DEFAULT_TIMEOUT_SECONDS = 60
+DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_OUTPUT_TOKENS = 160
 
 
-def ollama_is_available(model: str = DEFAULT_MODEL) -> bool:
-    """Return True when the local Ollama service and model are available."""
+AVAILABILITY_TIMEOUT_SECONDS = 5
+
+
+def ollama_is_available(model: str = DEFAULT_MODEL, timeout: int = AVAILABILITY_TIMEOUT_SECONDS) -> bool:
+    """
+    Return True when the local Ollama service and model are available.
+
+    The check has its own short timeout: ollama.list() has none, so a service that
+    accepts connections but does not answer (starting up, loading a model, busy)
+    would otherwise block the whole pipeline indefinitely.
+    """
     try:
-        response = ollama.list()
+        response = ollama.Client(timeout=max(1, int(timeout))).list()
         models = response.get("models", []) if isinstance(response, dict) else getattr(response, "models", [])
 
         available_names = set()

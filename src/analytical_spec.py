@@ -315,8 +315,8 @@ def _extract_time_grain(question: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 _CATEGORICAL_ROLES = {"categorical", "category", "boolean", "bool"}
 _NUMERIC_ROLES = {"continuous", "numeric", "integer", "float"}
-_DESC_WORDS = r"highest|largest|greatest|biggest|most|maximum|top|best"
-_ASC_WORDS = r"lowest|smallest|least|fewest|minimum|bottom|worst"
+_DESC_WORDS = r"highest|largest|greatest|biggest|most|maximum|top|best|longest|oldest|richest"
+_ASC_WORDS = r"lowest|smallest|least|fewest|minimum|bottom|worst|shortest|youngest|poorest"
 _COUNT_NOUNS = r"customers?|clients?|people|persons?|records?|rows?|observations?|entries|members?|individuals?"
 _EXPLICIT_GROUP_MARKER = re.compile(
     r"\b(?:grouped by|group by|per|for each|within each|across|among)\b", re.IGNORECASE
@@ -432,7 +432,7 @@ def detect_grouped_ranking(
     if not text or not isinstance(profile_columns, dict) or not profile_columns:
         return None
     low = text.casefold()
-    if _EXPLICIT_GROUP_MARKER.search(low) or "conversion" in low:
+    if _EXPLICIT_GROUP_MARKER.search(low):
         return None
 
     # ---- top/bottom N <group> by count -------------------------------------
@@ -451,6 +451,19 @@ def detect_grouped_ranking(
                 "direction": "ascending" if bottom else "descending",
                 "limit": _extract_limit(text),
             }
+
+    # ---- top/bottom N <group> by [average|median|total] <metric> ----------
+    ranked_by = re.search(r"\b(?:top|bottom|first|last)\s+(?:\d+|" + _NUMBER_WORD_PATTERN + r")\b", low)
+    by_match = re.search(r"\bby\b", low)
+    if ranked_by and by_match and not count_by:
+        groups = _columns_in(text[: by_match.start()], profile_columns, _CATEGORICAL_ROLES)
+        metrics_found = _columns_in(text[by_match.end():], profile_columns, _NUMERIC_ROLES)
+        if groups and len(metrics_found) == 1:
+            aggregate = next((name for name, pattern in _AGGREGATE_WORDS if re.search(pattern, low)), "mean")
+            bottom = bool(re.search(r"\b(?:bottom|last)\b", low))
+            return {"kind": "ranking", "group": groups[-1][0], "metrics": [metrics_found[0][0]],
+                    "aggregate": aggregate, "direction": "ascending" if bottom else "descending",
+                    "limit": _extract_limit(text)}
 
     # ---- most/least common <group> -----------------------------------------
     common = re.search(r"\b(most|least)\s+(?:common|frequent|popular)\b", low)
@@ -552,6 +565,119 @@ def _unsupported_categorical_filters(
                     f"ask for a comparison by {name} instead."
                 )
     return issues
+
+
+def _extract_contamination(question, outlier_method):
+    """
+    Share of rows Isolation Forest should flag, taken from the question
+    ("flag the top 1% most unusual customers"). None means the default (5%).
+    Only meaningful for Isolation Forest; ignored otherwise.
+    """
+    if not outlier_method or "isolation" not in str(outlier_method).replace(" ", "").casefold():
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:%|percent\b)", str(question or ""), flags=re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1)) / 100.0
+    return value if 0 < value < 0.5 else None
+
+
+
+# Questions about rates, distributions, data quality and rankings -----------------------
+_RATE_METRIC = "conversion"
+_RANK_WORDS = re.compile(r"\b(?:rank|ranking|ranked|sort|sorted|order|ordered)\b", re.IGNORECASE)
+_DISTRIBUTION_WORDS = re.compile(
+    r"\b(?:distribution|breakdown|break down|split|composition|proportions?|shares?|"
+    r"frequenc\w+|percentages?)\b", re.IGNORECASE)
+_RATE_QUESTION = re.compile(
+    r"\b(?:conversion|subscription)\s+rate\b|\brate\s+of\s+(?:conversion|subscription)\b|"
+    r"\b(?:percentage|proportion|share|fraction)\s+of\s+(?:customers|clients|people)?\s*"
+    r"(?:who\s+|that\s+|have\s+)?(?:subscribed|converted|subscribe|convert)\b", re.IGNORECASE)
+_HOW_MANY_CONVERTED = re.compile(
+    r"\bhow\s+many\s+(?:customers|clients|people)?\s*(?:have\s+)?(?:subscribed|converted|signed\s+up)\b",
+    re.IGNORECASE)
+
+
+def _distinct_columns(text, profile_columns, roles):
+    """Columns of `roles` in written order; a column glued to the previous one
+    ("housing loan") only completes that phrase and is dropped."""
+    found = _columns_in(text, profile_columns, roles)
+    kept = []
+    for item in sorted(found, key=lambda x: x[1]):
+        if kept and text[kept[-1][2]:item[1]].strip() == "":
+            continue
+        kept.append(item)
+    return kept
+
+
+def _apply_intent_rules(question, profile_columns, operations, metrics, group_by, issues):
+    """
+    Returns (operations, metrics, group_by, issues, focus).
+
+    Handles what marker-based parsing cannot: data-quality questions, rates,
+    distributions, unsupported statistics, and metric words that are really part
+    of a categorical column name ("age group").
+    """
+    low = question.casefold()
+    focus = None
+    numeric_ops = {"mean", "median", "sum", "min", "max", "std", "variance"}
+
+    # "age group" names the categorical column age_group; `age` is not a metric.
+    cat_spans = [sp for name, info in profile_columns.items()
+                 if info.get("role") in _CATEGORICAL_ROLES for sp in _column_spans(question, name)]
+    kept_metrics = []
+    for metric in metrics:
+        inside = any(
+            any(c_start <= m_start and m_end <= c_end and (c_end - c_start) > (m_end - m_start)
+                for c_start, c_end in cat_spans)
+            for m_start, m_end in _column_spans(question, metric)
+        )
+        if not inside:
+            kept_metrics.append(metric)
+    metrics = kept_metrics
+
+    # Data quality
+    if re.search(r"\bmissing\b|\bnulls?\b|\bnan\b|\bblank\b|empty values", low) and not (set(operations) & numeric_ops):
+        return ["missing_values"], [], [], [i for i in issues if "No supported analytical operation" not in i], None
+    if re.search(r"\bduplicat", low):
+        return ["duplicate_count"], [], [], [i for i in issues if "No supported analytical operation" not in i], None
+
+    # Percentiles / quartiles: not executable yet. Say so instead of answering something else.
+    if "quantile" in operations or re.search(r"\b\d+(?:st|nd|rd|th)\s+percentile\b|\bquartiles?\b|\bdeciles?\b", low):
+        operations = [op for op in operations if op != "quantile"]
+        issues = issues + ["Percentiles, quartiles and quantiles are not supported yet; the median "
+                           "(50th percentile) and the IQR outlier bounds are available."]
+
+    numeric_columns = [n for n, i in profile_columns.items() if i.get("role") in _NUMERIC_ROLES]
+
+    # Rates and counts of conversions ("conversion rate by job", "how many subscribed")
+    if _RATE_METRIC in numeric_columns:
+        if _HOW_MANY_CONVERTED.search(question):
+            return ["sum"], [_RATE_METRIC], [], [i for i in issues if "No supported analytical operation" not in i], None
+        if _RATE_QUESTION.search(question):
+            issues = [i for i in issues if "No supported analytical operation" not in i]
+            return ["mean"], [_RATE_METRIC], group_by, issues, None
+
+    # Distributions / breakdowns / shares
+    if _DISTRIBUTION_WORDS.search(question) and not (set(operations) & numeric_ops):
+        cats = [c for c in _distinct_columns(question, profile_columns, _CATEGORICAL_ROLES)]
+        nums = [c for c in _distinct_columns(question, profile_columns, _NUMERIC_ROLES)]
+        # "campaign contacts": a categorical word that directly follows a numeric
+        # column word belongs to that measure's name, not to a grouping.
+        cats = [
+            item for item in cats
+            if not any(question[n_end:item[1]].strip() == "" and n_end <= item[1] for _, n_start, n_end in nums if n_end <= item[1])
+        ]
+        issues = [i for i in issues if "No supported analytical operation" not in i]
+        if cats:
+            groups = [c[0] for c in cats]
+            focus = {"type": "group_distribution", "group": groups[0], "metric": None,
+                     "aggregate": "count", "direction": "descending", "limit": None}
+            return ["count"], [], groups, issues, focus
+        if nums:
+            return ["mean", "median", "std", "min", "max"], [nums[0][0]], [], issues, None
+
+    return operations, metrics, group_by, issues, focus
 
 
 def build_analytical_spec(
@@ -762,6 +888,12 @@ def build_analytical_spec(
     sort_direction = _extract_sort_direction(question)
     limit = _extract_limit(question)
 
+    operations, metrics, group_by, issues, intent_focus = _apply_intent_rules(
+        question, profile_columns, operations, metrics, group_by, issues
+    )
+    if intent_focus is not None:
+        mentioned_columns = list(dict.fromkeys(mentioned_columns + group_by + metrics))
+
     # "campaign duration": adjacent numeric column words form ONE phrase; the last
     # word is the measure and the first only qualifies it.
     if len(metrics) > 1:
@@ -781,7 +913,11 @@ def build_analytical_spec(
     if ranking is not None:
         group_by = [ranking["group"]]
         metrics = list(ranking["metrics"])
-        if ranking["aggregate"] == "count":
+        if ranking["kind"] == "ranking":
+            # "top 5 jobs by average balance": keep the rank operation (existing
+            # contract); the cut-off is applied to the validated values in the insight.
+            operations = [ranking["aggregate"], "rank"]
+        elif ranking["aggregate"] == "count":
             # Plain per-group counts are executed and independently validated;
             # the top/bottom-N selection is applied to those validated counts
             # when the insight is written (see grouped_count_support).
@@ -797,11 +933,26 @@ def build_analytical_spec(
             mentioned_columns + [ranking["group"]] + list(ranking["metrics"])
         ))
         answer_focus = {
-            "type": "group_extrema" if ranking["kind"] == "extrema" else "group_top_n",
+            "type": {"extrema": "group_extrema", "ranking": "group_ranking"}.get(ranking["kind"], "group_top_n"),
             "group": ranking["group"], "metric": (ranking["metrics"] or [None])[0],
             "aggregate": ranking["aggregate"], "direction": ranking["direction"],
             "limit": ranking["limit"],
         }
+
+    if answer_focus is None and intent_focus is not None:
+        answer_focus = intent_focus
+    core_operations = [op for op in operations if op != "rank"]
+    if (
+        answer_focus is None and group_by and len(metrics) == 1 and len(core_operations) == 1
+        and core_operations[0] in {"mean", "median", "sum"} and _RANK_WORDS.search(question)
+    ):
+        # "Rank the education levels by average balance": same data, ordered answer.
+        # The ordering is applied to the validated group values when the insight is
+        # written, so no separate rank step is executed.
+        operations = core_operations
+        answer_focus = {"type": "group_ranking", "group": group_by[0], "metric": metrics[0],
+                        "aggregate": core_operations[0], "limit": limit,
+                        "direction": "ascending" if re.search(r"\bascending\b|\blowest to highest\b", question, re.I) else "descending"}
 
     validation_requirements = [
         "execution_succeeded",
@@ -827,6 +978,7 @@ def build_analytical_spec(
         "task_type": legacy_task_type,
         "operations": operations,
         "outlier_method": outlier_method,
+        "contamination": _extract_contamination(question, outlier_method),
         "identifier_columns": [
             name for name, info in profile_columns.items()
             if info.get("role") == "identifier"

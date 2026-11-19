@@ -113,6 +113,10 @@ def _ranked(normalized, direction):
     return items
 
 
+def _share(count, total):
+    return (count / total * 100.0) if total else 0.0
+
+
 def displayed_groups(normalized, focus):
     """(direction, limit, list of (label, count)) that the insight must show."""
     direction = (focus or {}).get("direction") or "descending"
@@ -137,6 +141,14 @@ def generate_grouped_count_insight(normalized, task_analysis=None):
     total = normalized["total_rows"]
     listing = "; ".join(f"{label}: {count:,}" for label, count in shown)
     context = f"({groups} groups, {total:,} records in total)"
+
+    if focus and focus.get("type") == "group_distribution":
+        with_share = "; ".join(
+            f"{label}: {count:,} ({_share(count, total):.2f}%)" for label, count in shown)
+        return (
+            f"Distribution of customers by {column} {context}: {with_share}. "
+            "Counts and shares are descriptive and do not establish causation."
+        )
 
     if focus and limit == 1 and shown:
         label, count = shown[0]
@@ -185,8 +197,13 @@ def validate_grouped_count_insight(insight, normalized, task_analysis=None):
 
     positions, pairs = [], []
     single_winner = bool(focus and focus.get("limit") == 1)
+    is_distribution = bool(focus and focus.get("type") == "group_distribution")
     for label, count in shown:
-        pattern = re.escape(str(label)) + r"\s*:\s*" + re.escape(f"{count:,}") + r"(?![\d,])"
+        pattern = re.escape(str(label)) + r"\s*:\s*" + re.escape(f"{count:,}")
+        if is_distribution:
+            pattern += r"\s*\(" + re.escape(f"{_share(count, normalized['total_rows']):.2f}%") + r"\)"
+        else:
+            pattern += r"(?![\d,])"
         match = re.search(pattern, text, flags=re.IGNORECASE)
         pairs.append(match is not None)
         positions.append(match.start() if match else -1)
@@ -229,12 +246,16 @@ def build_grouped_count_evidence(normalized, primary_result, task_analysis=None)
                 "reason": "No validated grouped count result was available."}
     focus = _focus(task_analysis)
     direction, limit, shown = displayed_groups(normalized, focus)
+    group_results = {
+        label: dict(details, percent_value=_share(details["count_value"], normalized["total_rows"]))
+        for label, details in normalized["group_results"].items()
+    }
     evidence = {
         "status": "PASS",
         "analysis_type": ANALYSIS_TYPE,
         "group_column": normalized["group_column"],
         "group_columns": normalized["group_columns"],
-        "group_results": normalized["group_results"],
+        "group_results": group_results,
         "group_count": normalized["group_count"],
         "total_rows": normalized["total_rows"],
         "ranking_direction": direction,
@@ -245,6 +266,16 @@ def build_grouped_count_evidence(normalized, primary_result, task_analysis=None)
     }
     if isinstance(limit, int):
         evidence["requested_limit"] = limit
+    # "result" is what the report prints under Supporting Evidence and what the
+    # traceability step links to; without it both were empty.
+    evidence["result"] = {
+        "group_column": normalized["group_column"],
+        "group_count": normalized["group_count"],
+        "total_rows": normalized["total_rows"],
+        "ranking_direction": direction,
+        "displayed_groups": evidence["displayed_groups"],
+        "group_results": group_results,
+    }
     return evidence
 
 
@@ -296,14 +327,18 @@ def generate_grouped_count_recommendation(evidence, task_analysis=None):
     column = normalized["group_column"]
     ranked = _ranked(normalized, "descending")
     (top_label, top_count), (low_label, low_count) = ranked[0], ranked[-1]
+    total = normalized["total_rows"]
+    shares = bool((_focus(task_analysis) or {}).get("type") == "group_distribution")
+    top_share = f" ({_share(top_count, total):.2f}%)" if shares else ""
+    low_share = f" ({_share(low_count, total):.2f}%)" if shares else ""
     if len(ranked) == 1:
         body = (f"{top_label} is the only {column} group, with {top_count:,} customers.")
     elif top_count == low_count:
         body = f"All {column} groups have the same customer count, {top_count:,}."
     else:
         body = (
-            f"The largest {column} group is {top_label} with {top_count:,} customers, "
-            f"and the smallest is {low_label} with {low_count:,} customers."
+            f"The largest {column} group is {top_label} with {top_count:,} customers{top_share}, "
+            f"and the smallest is {low_label} with {low_count:,} customers{low_share}."
         )
     text = (
         f"{body} Group size alone does not show performance: compare an outcome such as "

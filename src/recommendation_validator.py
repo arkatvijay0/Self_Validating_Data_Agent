@@ -94,6 +94,38 @@ def _close(left, right):
     return abs(left - right) <= max(0.005, abs(right) * 1e-6)
 
 
+
+def _label_tokens(evidence, labels=None, depth=0):
+    """
+    Group labels found in the evidence that mix digits with other characters
+    ("26-35", "65+", "<=25", "3 Contacts"). Their digits name a category; they
+    are not numeric claims. Pure-number labels are left alone.
+    """
+    labels = set() if labels is None else labels
+    if depth > 10:
+        return labels
+    if isinstance(evidence, dict):
+        for key, value in evidence.items():
+            if key == "group_results" and isinstance(value, dict):
+                labels.update(str(k) for k in value.keys())
+            elif key == "group_values" and isinstance(value, dict):
+                labels.update(str(v) for v in value.values())
+            else:
+                _label_tokens(value, labels, depth + 1)
+    elif isinstance(evidence, (list, tuple)):
+        for item in evidence:
+            _label_tokens(item, labels, depth + 1)
+    return {l for l in labels if re.search(r"\d", l) and re.search(r"[^\d\s.,]", l)}
+
+
+def _mask_labels(text, evidence):
+    """Blank out category labels so their digits are not extracted as claims."""
+    masked = str(text or "")
+    for label in sorted(_label_tokens(evidence), key=len, reverse=True):
+        masked = masked.replace(label, " ")
+    return masked
+
+
 def _recommendation_text(recommendation):
     if isinstance(recommendation, dict):
         return str(recommendation.get("recommendation", "") or "")
@@ -415,7 +447,8 @@ def validate_recommendation(
     derived_differences = _derived_differences(evidence_numbers)
 
     numeric_claims = []
-    for match in _NUMBER_RE.finditer(text):
+    claim_text = _mask_labels(text, [evidence, primary_result])
+    for match in _NUMBER_RE.finditer(claim_text):
         raw = match.group(0)
         number = _finite_float(raw)
         if number is not None:
