@@ -1,5 +1,7 @@
-"""Dataset-focused Streamlit interface for the existing Self-Validating EDA Agent.
-Save as app.py in the project root and run: streamlit run app.py
+"""Self-Validating AI-Agent: upload-only, dataset-focused Streamlit application.
+
+No datasets are auto-loaded. The interface shows only the user's uploaded dataset,
+analysis controls, visualizations, and validation results. Run: streamlit run app.py
 """
 from __future__ import annotations
 
@@ -106,34 +108,6 @@ with st.sidebar:
         inject_fault = st.toggle("Fault-injection test", value=False,
                                  help="Use only to test the pipeline's error recovery behavior.")
 
-    st.divider()
-    st.subheader("🏆 Review-II Benchmark")
-    st.markdown(
-        """
-        <div style="font-size:0.85rem; line-height:1.5; color:#334155; margin-bottom:8px;">
-        <b>Evaluation vs. Base Paper (DS-STAR):</b><br/>
-        • <b>Overall Accuracy</b>: <b>93.11%</b> (DS-STAR: 52.0%)<br/>
-        • <b>Hard Tasks Acc</b>: <b>98.00%</b> (DS-STAR: 45.2%)<br/>
-        • <b>Precision</b>: <b>99.75%</b> (Zero Hallucination)<br/>
-        • <b>ROC-AUC Score</b>: <b>0.9965</b>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    pdf_path = ROOT / "assets" / "benchmark_450_questions_evaluation_report.pdf"
-    if not pdf_path.exists():
-        pdf_path = ROOT / "outputs" / "benchmark_450_questions_evaluation_report.pdf"
-    if pdf_path.exists():
-        with open(pdf_path, "rb") as f:
-            st.download_button(
-                "📑 Download 450-Q Report (.pdf)",
-                data=f.read(),
-                file_name="benchmark_450_questions_evaluation_report.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-
 frame = None
 active_path = None
 active_name = None
@@ -148,20 +122,6 @@ try:
         if not active_path.is_file():
             frame.to_csv(active_path, index=False)
         active_name = uploaded.name
-    else:
-        # Default auto-load for instant live cloud exploration (zero friction for examiners)
-        candidates = [
-            ROOT / "data" / "bank_marketing_cleaned.csv",
-            UPLOAD_DIR / "bank_marketing_cleaned_uploaded.csv",
-            UPLOAD_DIR / "active_uploaded_dataset.csv",
-            ROOT / "data" / "raw" / "sales.csv"
-        ]
-        for c_path in candidates:
-            if c_path.is_file():
-                frame = pd.read_csv(c_path, low_memory=False)
-                active_name = f"Default Benchmark Dataset ({c_path.name})"
-                active_path = c_path
-                break
 
 except Exception as exc:
     st.error(f"Could not load the dataset: {exc}")
@@ -170,11 +130,15 @@ st.title("🤖 Self Validating AI-Agent")
 st.caption("Upload a dataset, explore its columns, and run analytical questions with result validation.")
 
 if frame is None:
-    st.info("Upload a CSV or Excel dataset using the panel on the left to get started.")
+    st.info("No dataset selected. Upload a CSV or Excel file in the sidebar to begin.")
 else:
     st.write(f"**Current dataset:** {active_name}")
-    if {"question", "difficulty"}.issubset({str(c).lower() for c in frame.columns}):
-        st.info("This upload contains benchmark questions rather than the original customer records. For customer analysis, upload the Bank Marketing dataset CSV instead.")
+    # Session history must always belong to the dataset currently selected.
+    dataset_fingerprint = hashlib.sha256(uploaded.getvalue()).hexdigest() if uploaded is not None else None
+    if st.session_state.get("_active_dataset_fingerprint") != dataset_fingerprint:
+        st.session_state["_active_dataset_fingerprint"] = dataset_fingerprint
+        st.session_state["analysis_runs"] = []
+        st.session_state["question"] = ""
     total_cells = frame.shape[0] * frame.shape[1]
     missing = int(frame.isna().sum().sum())
     cols = st.columns(5)
