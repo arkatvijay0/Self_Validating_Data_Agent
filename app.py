@@ -33,7 +33,7 @@ except Exception as exc:
     pipeline = None
     PIPELINE_ERROR = f"{type(exc).__name__}: {exc}"
 
-st.set_page_config(page_title="Self Validating AI-Agent", page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="VeVaEDA", page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
