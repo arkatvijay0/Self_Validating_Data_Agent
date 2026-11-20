@@ -777,7 +777,7 @@ try:
 except Exception as exc:
     st.error(f"Could not load the dataset: {exc}")
 
-st.title("🤖 VeriEDA(AI-Agent")
+st.title("🤖 VeriEDA(AI-Agent)"
 st.caption("Upload a dataset, explore its columns, and run analytical questions with result validation.")
 
 if frame is None:
