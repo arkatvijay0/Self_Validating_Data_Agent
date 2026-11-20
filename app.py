@@ -61,9 +61,103 @@ h1 {color:#183e74!important;letter-spacing:-.035em;font-weight:800!important;}
 h2,h3 {color:#214b80!important;}
 [data-testid="stDataFrame"] {border-radius:12px;overflow:hidden;border:1px solid #dce5f4;}
 [data-testid="stTextArea"] textarea {background:#fff;border-radius:12px;border:1px solid #cfdcf0;}
+
+/* Responsive dataset overview cards. Values never use Streamlit's ellipsis layout. */
+.dataset-kpi-grid {
+    display: grid;
+    grid-template-columns: minmax(220px, 1.3fr) repeat(4, minmax(148px, 1fr));
+    gap: 14px;
+    align-items: stretch;
+    margin: 12px 0 20px 0;
+}
+.dataset-kpi-card {
+    background: linear-gradient(145deg, #ffffff 0%, #f7faff 100%);
+    border: 1px solid #d8e5f6;
+    border-radius: 16px;
+    padding: 19px 20px;
+    min-width: 0;
+    min-height: 124px;
+    box-shadow: 0 5px 16px rgba(36,67,125,.06);
+}
+.dataset-kpi-label {
+    color: #536e8e;
+    font-size: 0.95rem;
+    font-weight: 600;
+    margin-bottom: 10px;
+    line-height: 1.3;
+}
+.dataset-kpi-value {
+    color: #153c76;
+    font-size: clamp(1.6rem, 2.15vw, 2.35rem);
+    line-height: 1.2;
+    letter-spacing: -0.045em;
+    font-weight: 750;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+@media (max-width: 1250px) {
+    .dataset-kpi-grid {
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    }
+}
+@media (max-width: 650px) {
+    .dataset-kpi-grid {
+        grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
+        gap: 10px;
+    }
+    .dataset-kpi-card {
+        padding: 16px;
+        min-height: 108px;
+    }
+    .dataset-kpi-value {
+        font-size: clamp(1.35rem, 5vw, 1.9rem);
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
+
+
+def format_indian_number(value: int) -> str:
+    """Readable integer formatting: 53211 -> 53,211; 1000000 -> 10,00,000."""
+    number = int(value)
+    sign = "-" if number < 0 else ""
+    digits = str(abs(number))
+    if len(digits) <= 3:
+        return sign + digits
+    trailing = digits[-3:]
+    leading = digits[:-3]
+    groups = []
+    while leading:
+        groups.insert(0, leading[-2:])
+        leading = leading[:-2]
+    return sign + ",".join(groups + [trailing])
+
+
+def render_dataset_metrics(frame: pd.DataFrame) -> None:
+    """Render all five metrics without truncating large row counts."""
+    row_count, column_count = frame.shape
+    missing_count = int(frame.isna().sum().sum())
+    duplicate_count = int(frame.duplicated().sum())
+    total_cells = row_count * column_count
+    completeness = 100 * (1 - missing_count / total_cells) if total_cells else 0.0
+
+    metrics = [
+        ("Rows", format_indian_number(row_count)),
+        ("Columns", format_indian_number(column_count)),
+        ("Missing cells", format_indian_number(missing_count)),
+        ("Duplicate rows", format_indian_number(duplicate_count)),
+        ("Completeness", f"{completeness:.1f}%"),
+    ]
+
+    cards = "".join(
+        '<div class="dataset-kpi-card">'
+        f'<div class="dataset-kpi-label">{label}</div>'
+        f'<div class="dataset-kpi-value" title="{value}">{value}</div>'
+        '</div>'
+        for label, value in metrics
+    )
+    st.markdown(f'<div class="dataset-kpi-grid">{cards}</div>', unsafe_allow_html=True)
 
 def read_upload(file) -> pd.DataFrame:
     content = file.getvalue()
@@ -696,17 +790,7 @@ else:
         st.session_state["_active_dataset_fingerprint"] = dataset_fingerprint
         st.session_state["analysis_runs"] = []
         st.session_state["question"] = ""
-    total_cells = frame.shape[0] * frame.shape[1]
-    missing = int(frame.isna().sum().sum())
-    cols = st.columns(5)
-    for col, (label, value) in zip(cols, [
-        ("Rows", f"{len(frame):,}"),
-        ("Columns", f"{len(frame.columns):,}"),
-        ("Missing cells", f"{missing:,}"),
-        ("Duplicate rows", f"{int(frame.duplicated().sum()):,}"),
-        ("Completeness", f"{(100 * (1 - missing / total_cells) if total_cells else 0):.1f}%"),
-    ]):
-        col.metric(label, value)
+    render_dataset_metrics(frame)
 
     analyze, explore, visualize, history = st.tabs(["Ask a question", "Dataset overview", "Visualize", "Results & validation"])
 
