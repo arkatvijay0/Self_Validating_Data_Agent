@@ -1,0 +1,51 @@
+conda activate data_agent
+cd C:\Users\Vijay\Desktop\Self_Validating_Data_Agent
+python -m py_compile src\main.py app.py
+streamlit run app.py
+
+
+
+1. Stage your changes - git add .
+2. Commit your changes - git commit -m "Describe your changes"
+3. Push to GitHub - git push origin main
+4. Check the status - git status
+
+
+conda activate data_agent
+cd C:\Users\Vijay\Desktop\Self_Validating_Data_Agent
+streamlit run app.py
+
+
+QUESTIONS:
+
+How many missing values are present in the dataset?
+What is the average duration of calls in August?
+Calculate the average age of customers.
+Find the median balance of customers.
+Calculate the maximum and minimum campaign duration.
+Calculate the standard deviation of customer balances.
+Count the total number of customers.
+Calculate the average balance grouped by housing.
+Calculate the average age grouped by job and marital status.
+Find the total balance grouped by education.
+Count customers grouped by job.
+Calculate the average campaign duration grouped by month and contact method.
+Calculate the Pearson correlation between age and balance.
+Calculate the Spearman correlation between age and campaign.
+Analyze the relationship between balance and duration.
+Calculate the correlation between previous and campaign.
+Determine whether age and balance have a strong positive relationship.
+Calculate the 25th, 50th and 75th percentiles of balance.
+Calculate the variance of customer age.
+Identify missing values in every column.
+Identify duplicate customer records.
+Calculate the distribution of customers across education categories.
+Detect outliers in the balance column using the IQR method.
+Identify unusual values in campaign duration.
+Detect anomalies in customer balances using Isolation Forest.
+Which job category has the highest average balance?
+Which education category has the lowest average balance?
+Compare average balance between customers with and without housing loans.
+Which month has the highest average campaign duration?
+Summarize the customer conversion distribution.
+Identify the top three job categories by customer count.
