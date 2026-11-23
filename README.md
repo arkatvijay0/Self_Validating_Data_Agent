@@ -1,5 +1,5 @@
 
-# Self-Validating AI Agent for Automated Exploratory Data Analysis
+# VeVaEDA: A Self-Validating AI Agent for Automated Exploratory Data Analysis and Evidence-Grounded Insights
 
 **An AI-powered framework for automated data analysis, result validation, and evidence-grounded insights.**
 
